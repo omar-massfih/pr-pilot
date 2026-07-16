@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pr_pilot.config import BabysitConfig, Config, GitHubConfig, MemoryConfig
+from pr_pilot.config import (
+    BabysitConfig,
+    Config,
+    GitHubConfig,
+    MemoryConfig,
+    WorkflowConfig,
+)
+from pr_pilot.errors import AgentShipError
 from pr_pilot.github import PullRequestStatus
 from pr_pilot.memory import Project
 from pr_pilot.state import RunState
@@ -50,8 +57,10 @@ class FakeRepo:
 class FakeGitHub:
     def __init__(self, statuses=None):
         self.statuses = iter(statuses or [])
+        self.created = []
 
     def create_pr(self, **kwargs):
+        self.created.append(kwargs)
         return "https://github.test/pull/1"
 
     def status(self):
@@ -105,6 +114,66 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual([call[1] for call in implementer.calls], [False, True])
             self.assertEqual([call[1] for call in reviewer.calls], [False])
             self.assertEqual(len(workflow.repo.commits), 1)
+
+    def test_review_and_repair_loops_until_approval_before_opening_pr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                repo=Path(directory),
+                workflow=WorkflowConfig(max_review_attempts=2),
+                babysit=BabysitConfig(enabled=False),
+                memory=MemoryConfig(enabled=False),
+                state_dir=Path(directory) / "state",
+            )
+            implementer = FakeProvider(["the plan", "implemented", "repair 1", "repair 2"])
+            reviewer = FakeProvider(
+                [
+                    "First finding\nVERDICT: CHANGES_REQUESTED",
+                    "Second finding\nVERDICT: CHANGES_REQUESTED",
+                    "No findings\nVERDICT: APPROVE",
+                ]
+            )
+            workflow = Workflow(config, implementer=implementer, reviewer=reviewer)
+            workflow.repo = FakeRepo()
+            workflow.repo.changed = True
+            github = FakeGitHub()
+            workflow.github = github
+
+            state = workflow.run("Add a loop", watch=False)
+
+            self.assertEqual(state.phase, "pr_open")
+            self.assertEqual(state.review_attempts, 2)
+            self.assertEqual([call[1] for call in implementer.calls], [False, True, True, True])
+            self.assertEqual(len(reviewer.calls), 3)
+            self.assertEqual(len(github.created), 1)
+
+    def test_review_loop_stops_before_pr_on_invalid_follow_up_verdict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                repo=Path(directory),
+                workflow=WorkflowConfig(max_review_attempts=2),
+                babysit=BabysitConfig(enabled=False),
+                memory=MemoryConfig(enabled=False),
+                state_dir=Path(directory) / "state",
+            )
+            workflow = Workflow(
+                config,
+                implementer=FakeProvider(["the plan", "implemented", "repaired"]),
+                reviewer=FakeProvider(
+                    [
+                        "Finding\nVERDICT: CHANGES_REQUESTED",
+                        "Review completed, but I cannot give VERDICT: APPROVE",
+                    ]
+                ),
+            )
+            workflow.repo = FakeRepo()
+            workflow.repo.changed = True
+            github = FakeGitHub()
+            workflow.github = github
+
+            with self.assertRaisesRegex(AgentShipError, "required verdict"):
+                workflow.run("Add a loop", watch=False)
+
+            self.assertEqual(github.created, [])
 
     def test_babysitter_fixes_failure_then_completes(self):
         with tempfile.TemporaryDirectory() as directory:

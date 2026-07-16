@@ -23,6 +23,11 @@ class GitHubConfig:
 
 
 @dataclass(frozen=True)
+class WorkflowConfig:
+    max_review_attempts: int = 3
+
+
+@dataclass(frozen=True)
 class BabysitConfig:
     enabled: bool = True
     interval_seconds: int = 30
@@ -59,6 +64,7 @@ class Config:
     implementer: ProviderConfig = field(default_factory=ProviderConfig)
     reviewer: ProviderConfig = field(default_factory=ProviderConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     babysit: BabysitConfig = field(default_factory=BabysitConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -88,6 +94,7 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
 
     configured_repo = repo or Path(data.get("repo", "."))
     gh = data.get("github", {})
+    workflow = data.get("workflow", {})
     baby = data.get("babysit", {})
     telegram = data.get("telegram", {})
     memory = data.get("memory", {})
@@ -98,6 +105,9 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         github=GitHubConfig(
             base_branch=str(gh.get("base_branch", "main")),
             draft=bool(gh.get("draft", True)),
+        ),
+        workflow=WorkflowConfig(
+            max_review_attempts=int(workflow.get("max_review_attempts", 3)),
         ),
         babysit=BabysitConfig(
             enabled=bool(baby.get("enabled", True)),
@@ -130,6 +140,8 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         raise AgentShipError("implementer.name must be 'codex' or 'cursor'")
     if config.reviewer.name not in {"codex", "cursor"}:
         raise AgentShipError("reviewer.name must be 'codex' or 'cursor'")
+    if config.workflow.max_review_attempts < 0:
+        raise AgentShipError("workflow.max_review_attempts cannot be negative")
     for provider in (config.implementer, config.reviewer):
         if provider.limit_poll_seconds <= 0 or provider.limit_max_wait_seconds < 0:
             raise AgentShipError(

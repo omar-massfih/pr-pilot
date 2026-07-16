@@ -18,6 +18,9 @@ limit_max_wait_seconds = 0
 base_branch = "main"
 draft = true
 
+[workflow]
+max_review_attempts = 3
+
 [babysit]
 enabled = true
 interval_seconds = 30

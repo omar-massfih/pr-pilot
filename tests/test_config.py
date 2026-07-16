@@ -21,6 +21,8 @@ limit_poll_seconds = 15
 limit_max_wait_seconds = 300
 [reviewer]
 name = "codex"
+[workflow]
+max_review_attempts = 5
 [babysit]
 enabled = false
 max_fix_attempts = 7
@@ -33,6 +35,7 @@ allowed_chat_ids = [42]
             self.assertEqual(config.implementer.limit_poll_seconds, 15)
             self.assertEqual(config.implementer.limit_max_wait_seconds, 300)
             self.assertEqual(config.reviewer.name, "codex")
+            self.assertEqual(config.workflow.max_review_attempts, 5)
             self.assertFalse(config.babysit.enabled)
             self.assertEqual(config.babysit.max_fix_attempts, 7)
             self.assertEqual(config.telegram.allowed_chat_ids, (42,))
@@ -44,6 +47,16 @@ allowed_chat_ids = [42]
             config_file = root / "config.toml"
             config_file.write_text(f'repo = "{root}"\n[implementer]\nname = "other"\n')
             with self.assertRaises(AgentShipError):
+                load_config(config_file)
+
+    def test_rejects_negative_review_attempt_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'repo = "{root}"\n[workflow]\nmax_review_attempts = -1\n'
+            )
+            with self.assertRaisesRegex(AgentShipError, "max_review_attempts"):
                 load_config(config_file)
 
 

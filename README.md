@@ -16,12 +16,13 @@ CLI / Telegram
       |
       v
 plan (read-only agent) -> implement (write agent) -> independent review
-                                                      |
-                                                      v
-                                          commit -> push -> draft PR
-                                                      |
-                                                      v
-                              poll checks/reviews -> fix -> push -> repeat
+                              ^                       |          |
+                              |                       | changes  | approved
+                              +-------- repair <------+          v
+                                                     commit -> push -> draft PR
+                                                                       |
+                                                                       v
+                                               poll checks/reviews -> fix -> push -> repeat
 ```
 
 Each run is stored as JSON under `~/.pr-pilot/runs`, so PR monitoring can be resumed after a
@@ -173,7 +174,7 @@ containers or per-run Git worktrees and put intake onto a durable queue.
   embeddings and search remain local.
 - Start with draft PRs and branch protection enabled.
 - Use separate bot/service credentials with least-privilege repository access.
-- The program stops before opening a PR if the reviewer still requests changes after one repair pass.
+- Before opening a PR, review and repair repeat up to `workflow.max_review_attempts` times.
 - PR babysitting has bounded polling and repair attempts. It does not merge, approve, or bypass CI.
 - A comment can trigger an agent assessment, but the prompt tells it to ignore non-actionable text.
 - Run one PR Pilot process per target worktree. The MVP does not lock concurrent runs.

@@ -14,6 +14,7 @@ class RunState:
     phase: str = "created"
     plan: str = ""
     review: str = ""
+    review_attempts: int = 0
     pr_url: str = ""
     handled_feedback: list[str] = field(default_factory=list)
     fix_attempts: int = 0
@@ -33,4 +34,3 @@ class StateStore:
     def load(self, run_id: str) -> RunState:
         payload = json.loads((self.root / f"{run_id}.json").read_text())
         return RunState(**payload)
-

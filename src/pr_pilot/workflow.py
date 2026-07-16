@@ -155,37 +155,40 @@ class Workflow:
         if not self.repo.has_changes():
             raise AgentShipError("The implementation agent completed without changing any files")
 
-        state.phase = "reviewing"
-        self.store.save(state)
-        state.review = self._invoke_read_only(
-            self.reviewer,
-            REVIEW_PROMPT.format(
-                feature=feature,
-                plan=state.plan,
-                memory_context=self._memory_context(feature + "\n" + state.plan, memory_project)
-                if self.memory and memory_project else "",
-            ),
+        memory_review_context = (
+            self._memory_context(feature + "\n" + state.plan, memory_project)
+            if self.memory and memory_project else ""
         )
-        if "VERDICT: CHANGES_REQUESTED" in state.review:
-            self.implementer.invoke(
-                REPAIR_PROMPT.format(feature=feature, review=state.review),
-                repo=self.config.repo,
-                write=True,
-            )
+        while True:
+            state.phase = "reviewing"
+            self.store.save(state)
             state.review = self._invoke_read_only(
                 self.reviewer,
                 REVIEW_PROMPT.format(
                     feature=feature,
                     plan=state.plan,
-                    memory_context=self._memory_context(feature + "\n" + state.plan, memory_project)
-                    if self.memory and memory_project else "",
+                    memory_context=memory_review_context,
                 ),
             )
-            if "VERDICT: CHANGES_REQUESTED" in state.review:
-                self.store.save(state)
-                raise AgentShipError("Independent review still requests changes; run stopped before PR")
-        elif "VERDICT: APPROVE" not in state.review:
-            raise AgentShipError("Reviewer did not return the required verdict")
+            self.store.save(state)
+            verdict = state.review.rstrip().splitlines()[-1].strip() if state.review.strip() else ""
+            if verdict == "VERDICT: APPROVE":
+                break
+            if verdict != "VERDICT: CHANGES_REQUESTED":
+                raise AgentShipError("Reviewer did not return the required verdict")
+            if state.review_attempts >= self.config.workflow.max_review_attempts:
+                raise AgentShipError(
+                    "Independent review still requests changes after the configured attempt limit; "
+                    "run stopped before PR"
+                )
+            state.phase = "repairing"
+            state.review_attempts += 1
+            self.store.save(state)
+            self.implementer.invoke(
+                REPAIR_PROMPT.format(feature=feature, review=state.review),
+                repo=self.config.repo,
+                write=True,
+            )
         if self.memory and memory_project:
             self.memory.record_run(state)
 
