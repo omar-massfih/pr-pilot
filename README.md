@@ -144,6 +144,19 @@ Resume PR monitoring using the run ID printed by the first command:
 pr-pilot watch 20260716123000123456
 ```
 
+Let the agent inspect the repository, recommend the next scoped feature, ship it through the full
+review and PR feedback workflow, and repeat until stopped with `Ctrl-C` or no useful feature remains:
+
+```bash
+pr-pilot auto
+```
+
+For a bounded unattended run, limit the number of pull requests it may create:
+
+```bash
+pr-pilot auto --max-features 3
+```
+
 ## Telegram intake
 
 Create a bot with BotFather, put only its token in the environment, and add your numeric Telegram

@@ -28,6 +28,20 @@ Inspect the repository and produce a concrete implementation plan. Do not edit f
 Return Markdown only.
 """
 
+RECOMMEND_PROMPT = """You are selecting the next feature for an autonomous software project.
+
+Inspect the repository in read-only mode, including its documentation, tests, current behavior,
+TODOs, and obvious gaps. Recommend exactly one small, high-value feature that can be implemented and
+reviewed as a single pull request. Prefer user value, correctness, and maintainability over novelty.
+Do not recommend work already represented by these recent feature requests:
+
+{recent_features}
+
+Return only a concise feature request in plain text (one to three sentences), with no heading,
+analysis, list, or Markdown fence. If there is no meaningful scoped improvement to make, return
+exactly: NO_FEATURE
+"""
+
 IMPLEMENT_PROMPT = """You are the implementation agent in an automated pull-request workflow.
 
 Feature request:
@@ -117,6 +131,21 @@ class Workflow:
         self.store = StateStore(config.state_dir / "runs")
         self.memory = memory
         self.sleep = sleeper
+
+    def recommend_feature(self) -> str | None:
+        self.repo.validate()
+        self.repo.checkout_base(self.config.github.base_branch)
+        recent = self.store.recent_features()
+        recent_features = "\n".join(f"- {feature}" for feature in recent) or "- None"
+        recommendation = self._invoke_read_only(
+            self.implementer,
+            RECOMMEND_PROMPT.format(recent_features=recent_features),
+        ).strip()
+        if recommendation == "NO_FEATURE":
+            return None
+        if not recommendation:
+            raise AgentShipError("Feature recommendation agent returned an empty response")
+        return recommendation
 
     def run(self, feature: str, *, watch: bool | None = None) -> RunState:
         feature = feature.strip()

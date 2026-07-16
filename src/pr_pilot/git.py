@@ -25,10 +25,13 @@ class GitRepo:
         slug = re.sub(r"[^a-z0-9]+", "-", feature.lower()).strip("-")[:42] or "feature"
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         branch = f"agent/{slug}-{stamp}"
-        run(["git", "switch", base], cwd=self.path)
-        run(["git", "pull", "--ff-only"], cwd=self.path)
+        self.checkout_base(base)
         run(["git", "switch", "-c", branch], cwd=self.path)
         return branch
+
+    def checkout_base(self, base: str) -> None:
+        run(["git", "switch", base], cwd=self.path)
+        run(["git", "pull", "--ff-only"], cwd=self.path)
 
     def has_changes(self) -> bool:
         return bool(self.status())

@@ -34,3 +34,16 @@ class StateStore:
     def load(self, run_id: str) -> RunState:
         payload = json.loads((self.root / f"{run_id}.json").read_text())
         return RunState(**payload)
+
+    def recent_features(self, limit: int = 20) -> list[str]:
+        if not self.root.exists():
+            return []
+        features: list[str] = []
+        for path in sorted(self.root.glob("*.json"), reverse=True):
+            payload = json.loads(path.read_text())
+            feature = str(payload.get("feature") or "").strip()
+            if feature and feature not in features:
+                features.append(feature)
+            if len(features) >= limit:
+                break
+        return features

@@ -33,6 +33,7 @@ class FakeRepo:
         self.changed = False
         self.commits = []
         self.pushes = []
+        self.checked_out_bases = []
 
     def validate(self):
         pass
@@ -42,6 +43,9 @@ class FakeRepo:
 
     def create_branch(self, feature, base):
         return "agent/test-branch"
+
+    def checkout_base(self, base):
+        self.checked_out_bases.append(base)
 
     def has_changes(self):
         return self.changed
@@ -91,6 +95,44 @@ class FakeMemory:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_recommends_next_feature_from_repository_and_run_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                repo=root,
+                memory=MemoryConfig(enabled=False),
+                state_dir=root / "state",
+            )
+            implementer = FakeProvider(["Add a dry-run mode for publishing changes."])
+            workflow = Workflow(config, implementer=implementer, reviewer=FakeProvider([]))
+            repo = FakeRepo()
+            workflow.repo = repo
+            workflow.store.save(RunState("previous", "Add JSON output", str(root)))
+
+            feature = workflow.recommend_feature()
+
+            self.assertEqual(feature, "Add a dry-run mode for publishing changes.")
+            self.assertEqual(repo.checked_out_bases, ["main"])
+            self.assertEqual(implementer.calls[0][1], False)
+            self.assertIn("Add JSON output", implementer.calls[0][0])
+
+    def test_recommendation_can_stop_the_autonomous_loop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                repo=root,
+                memory=MemoryConfig(enabled=False),
+                state_dir=root / "state",
+            )
+            workflow = Workflow(
+                config,
+                implementer=FakeProvider(["NO_FEATURE"]),
+                reviewer=FakeProvider([]),
+            )
+            workflow.repo = FakeRepo()
+
+            self.assertIsNone(workflow.recommend_feature())
+
     def test_full_run_uses_separate_review_and_opens_pr(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(

@@ -27,6 +27,18 @@ def parser() -> argparse.ArgumentParser:
     run_command.add_argument("--reviewer", choices=("codex", "cursor"))
     run_command.add_argument("--no-watch", action="store_true")
 
+    auto = commands.add_parser(
+        "auto", help="Recommend, implement, and ship features continuously"
+    )
+    auto.add_argument("--provider", choices=("codex", "cursor"))
+    auto.add_argument("--reviewer", choices=("codex", "cursor"))
+    auto.add_argument(
+        "--max-features",
+        type=int,
+        default=0,
+        help="Stop after this many features; 0 continues until no feature is recommended",
+    )
+
     watch = commands.add_parser("watch", help="Resume babysitting a previous run")
     watch.add_argument("run_id")
 
@@ -95,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             return project_command(config, args)
         if args.command == "memory":
             return memory_command(config, args)
-        if args.command == "run":
+        if args.command in {"run", "auto"}:
             if args.provider:
                 config = replace(
                     config, implementer=replace(config.implementer, name=args.provider)
@@ -104,8 +116,27 @@ def main(argv: list[str] | None = None) -> int:
                 config = replace(
                     config, reviewer=replace(config.reviewer, name=args.reviewer)
                 )
+        if args.command == "run":
             state = Workflow(config).run(args.feature, watch=not args.no_watch)
             print(f"Run: {state.run_id}\nPR: {state.pr_url}\nState: {state.phase}")
+            return 0
+        if args.command == "auto":
+            if args.max_features < 0:
+                raise AgentShipError("--max-features cannot be negative")
+            workflow = Workflow(config)
+            completed = 0
+            while not args.max_features or completed < args.max_features:
+                feature = workflow.recommend_feature()
+                if feature is None:
+                    print("No additional scoped feature was recommended; stopping.")
+                    return 0
+                print(f"Recommended feature: {feature}", flush=True)
+                state = workflow.run(feature, watch=True)
+                completed += 1
+                print(
+                    f"Run: {state.run_id}\nPR: {state.pr_url}\nState: {state.phase}",
+                    flush=True,
+                )
             return 0
         if args.command == "watch":
             state = StateStore(config.state_dir / "runs").load(args.run_id)
