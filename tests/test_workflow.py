@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pr_pilot.config import BabysitConfig, Config, GitHubConfig
+from pr_pilot.config import BabysitConfig, Config, GitHubConfig, MemoryConfig
 from pr_pilot.github import PullRequestStatus
+from pr_pilot.memory import Project
 from pr_pilot.state import RunState
 from pr_pilot.workflow import Workflow
 
@@ -57,6 +58,29 @@ class FakeGitHub:
         return next(self.statuses)
 
 
+class FakeMemoryDB:
+    def __init__(self, project):
+        self.project = project
+
+    def project_for_path(self, path):
+        return self.project
+
+
+class FakeMemory:
+    def __init__(self, project):
+        self.db = FakeMemoryDB(project)
+        self.recorded = 0
+
+    def index_related(self, project):
+        return []
+
+    def context(self, query, project):
+        return "[orders] API.md:1-2\nUse versioned invoice events."
+
+    def record_run(self, state):
+        self.recorded += 1
+
+
 class WorkflowTests(unittest.TestCase):
     def test_full_run_uses_separate_review_and_opens_pr(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,6 +88,7 @@ class WorkflowTests(unittest.TestCase):
                 repo=Path(directory),
                 github=GitHubConfig(draft=True),
                 babysit=BabysitConfig(enabled=False),
+                memory=MemoryConfig(enabled=False),
                 state_dir=Path(directory) / "state",
             )
             implementer = FakeProvider(["the plan", "implemented"])
@@ -86,6 +111,7 @@ class WorkflowTests(unittest.TestCase):
             config = Config(
                 repo=Path(directory),
                 babysit=BabysitConfig(interval_seconds=0, max_cycles=2),
+                memory=MemoryConfig(enabled=False),
                 state_dir=Path(directory) / "state",
             )
             implementer = FakeProvider(["fixed"])
@@ -107,6 +133,33 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result.fix_attempts, 1)
             self.assertEqual(len(repo.commits), 1)
             self.assertEqual(repo.pushes, ["agent/test"])
+
+    def test_memory_context_is_injected_into_plan_and_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                repo=root,
+                github=GitHubConfig(draft=True),
+                babysit=BabysitConfig(enabled=False),
+                memory=MemoryConfig(enabled=True, database=root / "memory.db"),
+                state_dir=root / "state",
+            )
+            project = Project("id", "active", root, "", "", "", "")
+            memory = FakeMemory(project)
+            implementer = FakeProvider(["the plan", "implemented"])
+            reviewer = FakeProvider(["VERDICT: APPROVE"])
+            workflow = Workflow(
+                config, implementer=implementer, reviewer=reviewer, memory=memory
+            )
+            workflow.repo = FakeRepo()
+            workflow.repo.changed = True
+            workflow.github = FakeGitHub()
+
+            workflow.run("Add invoices", watch=False)
+
+            self.assertIn("UNTRUSTED PROJECT MEMORY", implementer.calls[0][0])
+            self.assertIn("versioned invoice events", reviewer.calls[0][0])
+            self.assertEqual(memory.recorded, 3)
 
 
 if __name__ == "__main__":

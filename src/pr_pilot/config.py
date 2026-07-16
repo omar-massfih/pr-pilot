@@ -36,6 +36,22 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    enabled: bool = True
+    database: Path = Path("~/.pr-pilot/memory.db").expanduser()
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    profile_provider: str = "implementer"
+    profile_model: str | None = None
+    max_file_bytes: int = 524_288
+    chunk_chars: int = 1_600
+    chunk_overlap: int = 200
+    context_results: int = 10
+    context_chars: int = 12_000
+    relationship_depth: int = 1
+    relationship_threshold: float = 0.80
+
+
+@dataclass(frozen=True)
 class Config:
     repo: Path
     implementer: ProviderConfig = field(default_factory=ProviderConfig)
@@ -43,6 +59,7 @@ class Config:
     github: GitHubConfig = field(default_factory=GitHubConfig)
     babysit: BabysitConfig = field(default_factory=BabysitConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     state_dir: Path = Path("~/.pr-pilot").expanduser()
 
     def with_repo(self, repo: Path) -> "Config":
@@ -66,6 +83,7 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
     gh = data.get("github", {})
     baby = data.get("babysit", {})
     telegram = data.get("telegram", {})
+    memory = data.get("memory", {})
     config = Config(
         repo=configured_repo.resolve(),
         implementer=_provider(data.get("implementer", {})),
@@ -85,12 +103,40 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
             token_env=str(telegram.get("token_env", "TELEGRAM_BOT_TOKEN")),
             allowed_chat_ids=tuple(int(item) for item in telegram.get("allowed_chat_ids", [])),
         ),
+        memory=MemoryConfig(
+            enabled=bool(memory.get("enabled", True)),
+            database=Path(memory.get("database", "~/.pr-pilot/memory.db")).expanduser(),
+            embedding_model=str(memory.get("embedding_model", "BAAI/bge-small-en-v1.5")),
+            profile_provider=str(memory.get("profile_provider", "implementer")),
+            profile_model=memory.get("profile_model"),
+            max_file_bytes=int(memory.get("max_file_bytes", 524_288)),
+            chunk_chars=int(memory.get("chunk_chars", 1_600)),
+            chunk_overlap=int(memory.get("chunk_overlap", 200)),
+            context_results=int(memory.get("context_results", 10)),
+            context_chars=int(memory.get("context_chars", 12_000)),
+            relationship_depth=int(memory.get("relationship_depth", 1)),
+            relationship_threshold=float(memory.get("relationship_threshold", 0.80)),
+        ),
         state_dir=Path(data.get("state_dir", "~/.pr-pilot")).expanduser(),
     )
     if config.implementer.name not in {"codex", "cursor"}:
         raise AgentShipError("implementer.name must be 'codex' or 'cursor'")
     if config.reviewer.name not in {"codex", "cursor"}:
         raise AgentShipError("reviewer.name must be 'codex' or 'cursor'")
+    if config.memory.profile_provider not in {"implementer", "reviewer", "codex", "cursor"}:
+        raise AgentShipError(
+            "memory.profile_provider must be implementer, reviewer, codex, or cursor"
+        )
+    if config.memory.chunk_overlap >= config.memory.chunk_chars:
+        raise AgentShipError("memory.chunk_overlap must be smaller than memory.chunk_chars")
+    if config.memory.chunk_chars <= 0 or config.memory.chunk_overlap < 0:
+        raise AgentShipError("memory chunk sizes must be positive")
+    if config.memory.max_file_bytes <= 0 or config.memory.context_results <= 0:
+        raise AgentShipError("memory file and result limits must be positive")
+    if config.memory.context_chars <= 0 or config.memory.relationship_depth < 0:
+        raise AgentShipError("memory context limit must be positive and depth cannot be negative")
+    if not 0.0 <= config.memory.relationship_threshold <= 1.0:
+        raise AgentShipError("memory.relationship_threshold must be between 0 and 1")
     if not config.repo.is_dir():
         raise AgentShipError(f"Repository directory does not exist: {config.repo}")
     if not os.access(config.repo, os.W_OK):

@@ -32,6 +32,7 @@ allowed_chat_ids = [42]
             self.assertFalse(config.babysit.enabled)
             self.assertEqual(config.babysit.max_fix_attempts, 7)
             self.assertEqual(config.telegram.allowed_chat_ids, (42,))
+            self.assertEqual(config.memory.embedding_model, "BAAI/bge-small-en-v1.5")
 
     def test_rejects_unknown_provider(self):
         with tempfile.TemporaryDirectory() as directory:

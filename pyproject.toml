@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pr-pilot"
-version = "0.1.0"
-description = "Turn feature requests into reviewed pull requests with Codex or Cursor."
+version = "0.2.0"
+description = "Ship reviewed pull requests with coding agents and local cross-project memory."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "PR Pilot contributors" }]
-dependencies = []
+dependencies = [
+  "fastembed>=0.8,<0.9",
+  "numpy>=1.26",
+]
 
 [project.scripts]
 pr-pilot = "pr_pilot.cli:main"

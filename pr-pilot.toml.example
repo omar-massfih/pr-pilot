@@ -21,6 +21,19 @@ max_cycles = 60
 max_fix_attempts = 3
 require_approval = false
 
+[memory]
+enabled = true
+database = "~/.pr-pilot/memory.db"
+embedding_model = "BAAI/bge-small-en-v1.5"
+profile_provider = "implementer"
+max_file_bytes = 524288
+chunk_chars = 1600
+chunk_overlap = 200
+context_results = 10
+context_chars = 12000
+relationship_depth = 1
+relationship_threshold = 0.80
+
 [telegram]
 token_env = "TELEGRAM_BOT_TOKEN"
 allowed_chat_ids = [123456789]

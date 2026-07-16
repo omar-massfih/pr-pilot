@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from dataclasses import replace
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from .config import ProviderConfig, load_config
 from .errors import AgentShipError
+from .memory import MemoryService, RELATION_TYPES
 from .state import StateStore
 from .telegram import TelegramBot
 from .workflow import Workflow
@@ -30,6 +32,48 @@ def parser() -> argparse.ArgumentParser:
 
     commands.add_parser("telegram", help="Run Telegram long-polling intake")
     commands.add_parser("doctor", help="Check local command dependencies")
+
+    project = commands.add_parser("project", help="Manage remembered projects")
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    project_add = project_commands.add_parser("add", help="Register and index a Git repository")
+    project_add.add_argument("path", nargs="?", type=Path)
+    project_commands.add_parser("list", help="List registered projects")
+    project_show = project_commands.add_parser("show", help="Show one project and its graph")
+    project_show.add_argument("project")
+    project_remove = project_commands.add_parser("remove", help="Forget a project and its index")
+    project_remove.add_argument("project")
+    tag = project_commands.add_parser("tag", help="Override generated project tags")
+    tag_commands = tag.add_subparsers(dest="tag_command", required=True)
+    for action in ("add", "remove"):
+        tag_action = tag_commands.add_parser(action)
+        tag_action.add_argument("project")
+        tag_action.add_argument("tag")
+    link = project_commands.add_parser("link", help="Override generated project relationships")
+    link_commands = link.add_subparsers(dest="link_command", required=True)
+    for action in ("add", "remove"):
+        link_action = link_commands.add_parser(action)
+        link_action.add_argument("source")
+        link_action.add_argument("type", choices=sorted(RELATION_TYPES))
+        link_action.add_argument("target")
+
+    memory = commands.add_parser("memory", help="Index and search local project memory")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    memory_index = memory_commands.add_parser("index", help="Refresh project indexes")
+    memory_index.add_argument("project", nargs="?")
+    memory_index.add_argument("--all", action="store_true")
+    memory_index.add_argument("--force", action="store_true")
+    memory_search = memory_commands.add_parser("search", help="Search project memory")
+    memory_search.add_argument("query")
+    memory_search.add_argument("--project")
+    memory_search.add_argument("--tag")
+    memory_search.add_argument("--limit", type=int, default=10)
+    memory_search.add_argument("--json", action="store_true")
+    memory_graph = memory_commands.add_parser("graph", help="Show the relationship graph")
+    memory_graph.add_argument("project", nargs="?")
+    memory_graph.add_argument("--depth", type=int, default=1)
+    memory_graph.add_argument("--json", action="store_true")
+    memory_commands.add_parser("stats", help="Show memory database statistics")
+    memory_commands.add_parser("setup", help="Download and verify the local embedding model")
     return root
 
 
@@ -39,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config, args.repo)
         if args.command == "doctor":
             return doctor(config)
+        if args.command == "project":
+            return project_command(config, args)
+        if args.command == "memory":
+            return memory_command(config, args)
         if args.command == "run":
             if args.provider:
                 config = replace(config, implementer=ProviderConfig(args.provider))
@@ -73,7 +121,94 @@ def doctor(config) -> int:
     missing = sorted({command for command in required if shutil.which(command) is None})
     if missing:
         raise AgentShipError("Missing commands: " + ", ".join(missing))
+    if config.memory.enabled:
+        try:
+            import fastembed  # noqa: F401
+            import numpy  # noqa: F401
+        except ImportError as exc:
+            raise AgentShipError(f"Missing memory dependency: {exc.name}") from exc
     print("Dependencies found: " + ", ".join(sorted(set(required))))
+    return 0
+
+
+def project_command(config, args) -> int:
+    service = MemoryService(config)
+    if args.project_command == "add":
+        project = service.add_project(args.path or config.repo)
+        result = service.index_project(project.id)
+        print(json.dumps({"id": project.id, **result}, indent=2))
+    elif args.project_command == "list":
+        for project in service.db.list_projects():
+            print(f"{project.id}\t{project.name}\t{project.path}")
+    elif args.project_command == "show":
+        project = service.db.resolve_project(args.project)
+        payload = service.graph(project.id, depth=1)
+        payload["project"] = {
+            "id": project.id, "name": project.name, "path": str(project.path),
+            "remote_url": project.remote_url, "description": project.description,
+            "indexed_commit": project.indexed_commit,
+        }
+        print(json.dumps(payload, indent=2))
+    elif args.project_command == "remove":
+        service.remove_project(args.project)
+        print(f"Removed project: {args.project}")
+    elif args.project_command == "tag":
+        action = service.add_tag if args.tag_command == "add" else service.remove_tag
+        action(args.project, args.tag)
+        print(f"Tag {args.tag_command}: {args.tag}")
+    elif args.project_command == "link":
+        action = service.add_link if args.link_command == "add" else service.remove_link
+        action(args.source, args.type, args.target)
+        print(f"Relationship {args.link_command}: {args.source} {args.type} {args.target}")
+    return 0
+
+
+def memory_command(config, args) -> int:
+    service = MemoryService(config)
+    if args.memory_command == "index":
+        if args.all:
+            projects = service.db.list_projects()
+        elif args.project:
+            projects = [service.db.resolve_project(args.project)]
+        else:
+            project = service.db.project_for_path(config.repo)
+            if not project:
+                raise AgentShipError("Current repository is not registered; run `pr-pilot project add`")
+            projects = [project]
+        results = [service.index_project(project.id, force=args.force) for project in projects]
+        print(json.dumps(results, indent=2))
+    elif args.memory_command == "search":
+        results = service.search(
+            args.query, project_ref=args.project, tag=args.tag, limit=max(1, args.limit)
+        )
+        if args.json:
+            print(json.dumps([result.__dict__ for result in results], indent=2))
+        else:
+            for result in results:
+                print(
+                    f"[{result.project}] {result.path}:{result.start_line}-{result.end_line} "
+                    f"score={result.score:.4f}\n{result.content}\n"
+                )
+    elif args.memory_command == "graph":
+        graph = service.graph(args.project, args.depth)
+        if args.json:
+            print(json.dumps(graph, indent=2))
+        else:
+            names = {node["id"]: node["name"] for node in graph["nodes"]}
+            for node in graph["nodes"]:
+                print(f"{node['name']} [{', '.join(node['tags'])}]")
+            for edge in graph["edges"]:
+                print(
+                    f"{names[edge['source_id']]} --{edge['relation_type']}--> "
+                    f"{names[edge['target_id']]} ({edge['confidence']:.2f})"
+                )
+    elif args.memory_command == "stats":
+        print(json.dumps(service.stats(), indent=2))
+    elif args.memory_command == "setup":
+        vectors = service.embedder.embed(["PR Pilot local memory setup"])
+        if not vectors:
+            raise AgentShipError("Embedding model setup failed: " + str(service.embedder.error))
+        print(f"Embedding model ready: {config.memory.embedding_model}")
     return 0
 
 
