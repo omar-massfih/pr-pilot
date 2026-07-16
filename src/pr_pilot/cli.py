@@ -7,7 +7,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .config import ProviderConfig, load_config
+from .config import load_config
 from .errors import AgentShipError
 from .memory import MemoryService, RELATION_TYPES
 from .state import StateStore
@@ -37,11 +37,18 @@ def parser() -> argparse.ArgumentParser:
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_add = project_commands.add_parser("add", help="Register and index a Git repository")
     project_add.add_argument("path", nargs="?", type=Path)
+    project_add.add_argument("--ref", help="Git ref to index, or 'default' (new projects: HEAD)")
+    project_add.add_argument("--fetch", action="store_true", help="Fetch origin before indexing")
     project_commands.add_parser("list", help="List registered projects")
     project_show = project_commands.add_parser("show", help="Show one project and its graph")
     project_show.add_argument("project")
     project_remove = project_commands.add_parser("remove", help="Forget a project and its index")
     project_remove.add_argument("project")
+    project_ref = project_commands.add_parser("ref", help="Set a project's durable index ref")
+    project_ref_commands = project_ref.add_subparsers(dest="ref_command", required=True)
+    project_ref_set = project_ref_commands.add_parser("set")
+    project_ref_set.add_argument("project")
+    project_ref_set.add_argument("ref")
     tag = project_commands.add_parser("tag", help="Override generated project tags")
     tag_commands = tag.add_subparsers(dest="tag_command", required=True)
     for action in ("add", "remove"):
@@ -62,6 +69,7 @@ def parser() -> argparse.ArgumentParser:
     memory_index.add_argument("project", nargs="?")
     memory_index.add_argument("--all", action="store_true")
     memory_index.add_argument("--force", action="store_true")
+    memory_index.add_argument("--fetch", action="store_true", help="Fetch origin before indexing")
     memory_search = memory_commands.add_parser("search", help="Search project memory")
     memory_search.add_argument("query")
     memory_search.add_argument("--project")
@@ -89,9 +97,13 @@ def main(argv: list[str] | None = None) -> int:
             return memory_command(config, args)
         if args.command == "run":
             if args.provider:
-                config = replace(config, implementer=ProviderConfig(args.provider))
+                config = replace(
+                    config, implementer=replace(config.implementer, name=args.provider)
+                )
             if args.reviewer:
-                config = replace(config, reviewer=ProviderConfig(args.reviewer))
+                config = replace(
+                    config, reviewer=replace(config.reviewer, name=args.reviewer)
+                )
             state = Workflow(config).run(args.feature, watch=not args.no_watch)
             print(f"Run: {state.run_id}\nPR: {state.pr_url}\nState: {state.phase}")
             return 0
@@ -134,24 +146,29 @@ def doctor(config) -> int:
 def project_command(config, args) -> int:
     service = MemoryService(config)
     if args.project_command == "add":
-        project = service.add_project(args.path or config.repo)
+        project = service.add_project(
+            args.path or config.repo, index_ref=args.ref, fetch=args.fetch
+        )
         result = service.index_project(project.id)
         print(json.dumps({"id": project.id, **result}, indent=2))
     elif args.project_command == "list":
         for project in service.db.list_projects():
-            print(f"{project.id}\t{project.name}\t{project.path}")
+            print(f"{project.id}\t{project.name}\t{project.index_ref}\t{project.path}")
     elif args.project_command == "show":
         project = service.db.resolve_project(args.project)
         payload = service.graph(project.id, depth=1)
         payload["project"] = {
             "id": project.id, "name": project.name, "path": str(project.path),
             "remote_url": project.remote_url, "description": project.description,
-            "indexed_commit": project.indexed_commit,
+            "index_ref": project.index_ref, "indexed_commit": project.indexed_commit,
         }
         print(json.dumps(payload, indent=2))
     elif args.project_command == "remove":
         service.remove_project(args.project)
         print(f"Removed project: {args.project}")
+    elif args.project_command == "ref":
+        project = service.set_project_ref(args.project, args.ref)
+        print(f"Project index ref: {project.name} -> {project.index_ref}")
     elif args.project_command == "tag":
         action = service.add_tag if args.tag_command == "add" else service.remove_tag
         action(args.project, args.tag)
@@ -175,7 +192,10 @@ def memory_command(config, args) -> int:
             if not project:
                 raise AgentShipError("Current repository is not registered; run `pr-pilot project add`")
             projects = [project]
-        results = [service.index_project(project.id, force=args.force) for project in projects]
+        results = [
+            service.index_project(project.id, force=args.force, fetch=args.fetch)
+            for project in projects
+        ]
         print(json.dumps(results, indent=2))
     elif args.memory_command == "search":
         results = service.search(

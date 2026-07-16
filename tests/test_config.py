@@ -17,6 +17,8 @@ class ConfigTests(unittest.TestCase):
                 f'''repo = "{root}"
 [implementer]
 name = "cursor"
+limit_poll_seconds = 15
+limit_max_wait_seconds = 300
 [reviewer]
 name = "codex"
 [babysit]
@@ -28,6 +30,8 @@ allowed_chat_ids = [42]
             )
             config = load_config(config_file)
             self.assertEqual(config.implementer.name, "cursor")
+            self.assertEqual(config.implementer.limit_poll_seconds, 15)
+            self.assertEqual(config.implementer.limit_max_wait_seconds, 300)
             self.assertEqual(config.reviewer.name, "codex")
             self.assertFalse(config.babysit.enabled)
             self.assertEqual(config.babysit.max_fix_attempts, 7)

@@ -43,6 +43,11 @@ Cursor uses print mode without `--force` for planning/review, and adds `--force`
 must edit files. Cursor CLI is currently documented as beta, so pin and test CLI upgrades in your
 deployment.
 
+Provider quota and rate-limit responses are retried automatically. The default polls every 60
+seconds and waits indefinitely until Codex/Cursor accepts the invocation; `Ctrl-C` always stops it.
+Configure `limit_poll_seconds` and `limit_max_wait_seconds` under `[implementer]` or `[reviewer]`.
+A maximum of `0` means no deadline. Authentication, permission, and other errors fail immediately.
+
 ## Install and configure
 
 ```bash
@@ -69,8 +74,8 @@ configured read-only coding agent to create a project profile, and relates the p
 registered projects:
 
 ```bash
-pr-pilot --repo /work/payments project add
-pr-pilot --repo /work/orders project add
+pr-pilot --repo /work/payments project add --ref default --fetch
+pr-pilot --repo /work/orders project add --ref default --fetch
 pr-pilot project list
 pr-pilot project show payments
 ```
@@ -79,14 +84,27 @@ Memory is stored locally in `~/.pr-pilot/memory.db`. Keyword retrieval uses SQLi
 retrieval uses the local `BAAI/bge-small-en-v1.5` FastEmbed model. Repository content is not sent to
 an embedding API. Agent-assisted project profiling does use the configured Codex or Cursor provider.
 
+Projects index their configured Git ref. `HEAD` is the backward-compatible default; `--ref default`
+resolves the cached `origin/HEAD` (normally `origin/main`). Profiling runs from a temporary detached
+clone of the resolved commit, so feature branches and uncommitted files in your checkout are neither
+indexed nor shown to the profiler. Automatic workflow refreshes stay offline; use `--fetch` when you
+want PR Pilot to update `origin` first.
+
 Refresh and search memory:
 
 ```bash
-pr-pilot memory index --all
+pr-pilot memory index --all --fetch
 pr-pilot memory search "how are invoice events versioned?"
 pr-pilot memory search "refund ledger" --project payments --tag domain:billing
 pr-pilot memory graph payments --depth 2
 pr-pilot memory stats
+```
+
+Change an existing project's durable ref without re-registering it:
+
+```bash
+pr-pilot project ref set payments default
+pr-pilot memory index payments --fetch
 ```
 
 Generated tags use namespaced values such as `lang:python`, `framework:django`, `domain:billing`,

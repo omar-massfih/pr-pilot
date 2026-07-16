@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import struct
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pr_pilot.config import Config, MemoryConfig
-from pr_pilot.memory import MemoryService
+from pr_pilot.errors import AgentShipError
+from pr_pilot.memory import MemoryDB, MemoryService
 from pr_pilot.state import RunState
 
 
@@ -16,9 +19,14 @@ class FakeProfiler:
     def __init__(self, domain: str = "billing"):
         self.domain = domain
         self.calls = 0
+        self.snapshot_paths = []
+        self.snapshot_readmes = []
 
     def invoke(self, prompt, *, repo, write):
         self.calls += 1
+        self.snapshot_paths.append(repo)
+        readme = repo / "README.md"
+        self.snapshot_readmes.append(readme.read_text() if readme.exists() else "")
         return json.dumps(
             {
                 "summary": f"A Python {self.domain} service",
@@ -67,6 +75,15 @@ class RetryProfiler(FakeProfiler):
         return super().invoke(prompt, repo=repo, write=write)
 
 
+class FailingProfiler:
+    def __init__(self):
+        self.snapshot_path = None
+
+    def invoke(self, prompt, *, repo, write):
+        self.snapshot_path = repo
+        raise RuntimeError("profiler failed")
+
+
 def make_repo(root: Path, name: str) -> Path:
     repo = root / name
     repo.mkdir()
@@ -90,6 +107,7 @@ class MemoryTests(unittest.TestCase):
         )
         service = MemoryService(config, profiler=profiler or FakeProfiler())
         service.embedder = FakeEmbedder()
+        self.addCleanup(service.db.close)
         return service
 
     def test_indexes_tracked_text_searches_and_excludes_secrets(self):
@@ -176,6 +194,116 @@ class MemoryTests(unittest.TestCase):
 
             tags = service.graph(project.id)["nodes"][0]["tags"]
             self.assertIn("domain:finance", tags)
+
+    def test_migrates_existing_projects_to_head_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.db"
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE schema_meta(version INTEGER NOT NULL);
+                INSERT INTO schema_meta VALUES(1);
+                CREATE TABLE projects(
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+                    remote_url TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+                    indexed_commit TEXT NOT NULL DEFAULT '', profile_commit TEXT NOT NULL DEFAULT '',
+                    profile_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO projects(id,name,path,created_at,updated_at)
+                VALUES('id','legacy','/tmp/legacy','now','now');
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            database = MemoryDB(path)
+            self.addCleanup(database.close)
+
+            row = database.connection.execute(
+                "SELECT index_ref FROM projects WHERE id='id'"
+            ).fetchone()
+            version = database.connection.execute("SELECT version FROM schema_meta").fetchone()[0]
+            self.assertEqual(row["index_ref"], "HEAD")
+            self.assertEqual(version, 2)
+
+    def test_default_ref_uses_isolated_snapshot_and_preserves_worktree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root, "payments")
+            main_commit = subprocess.run(
+                ["git", "rev-parse", "main"], cwd=repo, text=True,
+                capture_output=True, check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/main", main_commit],
+                cwd=repo, check=True,
+            )
+            subprocess.run(
+                ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+                cwd=repo, check=True,
+            )
+            subprocess.run(["git", "switch", "-c", "feature"], cwd=repo, check=True, capture_output=True)
+            (repo / "README.md").write_text("UNCOMMITTED FEATURE CONTENT\n")
+            profiler = FakeProfiler()
+            service = self.service(root, repo, profiler)
+
+            project = service.add_project(repo, index_ref="default")
+            result = service.index_project(project.id)
+
+            self.assertEqual(project.index_ref, "origin/main")
+            self.assertEqual(result["commit"], main_commit)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "branch", "--show-current"], cwd=repo, text=True,
+                    capture_output=True, check=True,
+                ).stdout.strip(),
+                "feature",
+            )
+            self.assertEqual((repo / "README.md").read_text(), "UNCOMMITTED FEATURE CONTENT\n")
+            self.assertNotIn("UNCOMMITTED", profiler.snapshot_readmes[0])
+            self.assertFalse(profiler.snapshot_paths[0].exists())
+
+    def test_fetch_is_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root, "payments")
+            service = self.service(root, repo)
+            project = service.add_project(repo)
+            with patch.object(service, "_fetch") as fetch:
+                service.index_project(project.id)
+                fetch.assert_not_called()
+                service.index_project(project.id, fetch=True)
+                fetch.assert_called_once_with(repo.resolve())
+
+    def test_ref_updates_validate_and_reregister_preserves_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root, "payments")
+            service = self.service(root, repo)
+            project = service.add_project(repo, index_ref="main")
+
+            same = service.add_project(repo)
+            with self.assertRaises(AgentShipError):
+                service.set_project_ref(project.id, "missing-ref")
+
+            self.assertEqual(same.index_ref, "main")
+            updated = service.set_project_ref(project.id, "HEAD")
+            self.assertEqual(updated.index_ref, "HEAD")
+
+    def test_snapshot_is_cleaned_when_profiler_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root, "payments")
+            profiler = FailingProfiler()
+            service = self.service(root, repo, profiler)
+            project = service.add_project(repo)
+
+            with self.assertRaisesRegex(RuntimeError, "profiler failed"):
+                service.index_project(project.id)
+
+            self.assertIsNotNone(profiler.snapshot_path)
+            self.assertFalse(profiler.snapshot_path.exists())
 
 
 if __name__ == "__main__":

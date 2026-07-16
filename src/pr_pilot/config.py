@@ -12,6 +12,8 @@ from .errors import AgentShipError
 class ProviderConfig:
     name: str = "codex"
     model: str | None = None
+    limit_poll_seconds: int = 60
+    limit_max_wait_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -67,7 +69,12 @@ class Config:
 
 
 def _provider(data: dict, default: str = "codex") -> ProviderConfig:
-    return ProviderConfig(name=str(data.get("name", default)), model=data.get("model"))
+    return ProviderConfig(
+        name=str(data.get("name", default)),
+        model=data.get("model"),
+        limit_poll_seconds=int(data.get("limit_poll_seconds", 60)),
+        limit_max_wait_seconds=int(data.get("limit_max_wait_seconds", 0)),
+    )
 
 
 def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
@@ -123,6 +130,11 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         raise AgentShipError("implementer.name must be 'codex' or 'cursor'")
     if config.reviewer.name not in {"codex", "cursor"}:
         raise AgentShipError("reviewer.name must be 'codex' or 'cursor'")
+    for provider in (config.implementer, config.reviewer):
+        if provider.limit_poll_seconds <= 0 or provider.limit_max_wait_seconds < 0:
+            raise AgentShipError(
+                "provider limit_poll_seconds must be positive and limit_max_wait_seconds cannot be negative"
+            )
     if config.memory.profile_provider not in {"implementer", "reviewer", "codex", "cursor"}:
         raise AgentShipError(
             "memory.profile_provider must be implementer, reviewer, codex, or cursor"

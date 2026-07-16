@@ -5,10 +5,14 @@ state_dir = "~/.pr-pilot"
 [implementer]
 name = "codex" # "codex" or "cursor"
 # model = "optional-model-name"
+limit_poll_seconds = 60
+limit_max_wait_seconds = 0 # 0 waits indefinitely; Ctrl-C still stops immediately.
 
 [reviewer]
 name = "cursor" # A different provider is optional, but gives stronger independence.
 # model = "optional-model-name"
+limit_poll_seconds = 60
+limit_max_wait_seconds = 0
 
 [github]
 base_branch = "main"

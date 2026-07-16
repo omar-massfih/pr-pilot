@@ -8,7 +8,21 @@ from unittest.mock import patch
 
 from pr_pilot.commands import Result
 from pr_pilot.config import ProviderConfig
-from pr_pilot.providers import CodexProvider, CursorProvider
+from pr_pilot.errors import AgentShipError
+from pr_pilot.providers import AgentProvider, CodexProvider, CursorProvider, LimitRetryProvider
+
+
+class SequenceProvider(AgentProvider):
+    def __init__(self, results):
+        self.results = iter(results)
+        self.calls = 0
+
+    def invoke(self, prompt, *, repo, write):
+        self.calls += 1
+        result = next(self.results)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class ProviderTests(unittest.TestCase):
@@ -33,6 +47,47 @@ class ProviderTests(unittest.TestCase):
             self.assertNotIn("--force", mocked.call_args.args[0])
             provider.invoke("fix", repo=Path(directory), write=True)
             self.assertIn("--force", mocked.call_args.args[0])
+
+    def test_limit_errors_poll_until_provider_continues(self):
+        inner = SequenceProvider(
+            [AgentShipError("HTTP 429 rate limit exceeded"), AgentShipError("usage limit"), "done"]
+        )
+        sleeps = []
+        notices = []
+        provider = LimitRetryProvider(
+            inner,
+            ProviderConfig("codex", limit_poll_seconds=7),
+            sleeper=sleeps.append,
+            clock=lambda: 0,
+            notifier=notices.append,
+        )
+
+        result = provider.invoke("work", repo=Path("."), write=False)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(inner.calls, 3)
+        self.assertEqual(sleeps, [7, 7])
+        self.assertEqual(len(notices), 2)
+
+    def test_non_limit_errors_are_not_retried(self):
+        error = AgentShipError("authentication failed")
+        provider = LimitRetryProvider(
+            SequenceProvider([error]), ProviderConfig("codex"), sleeper=lambda _: None
+        )
+        with self.assertRaisesRegex(AgentShipError, "authentication failed"):
+            provider.invoke("work", repo=Path("."), write=False)
+
+    def test_configured_limit_wait_can_expire(self):
+        times = iter([0, 6])
+        provider = LimitRetryProvider(
+            SequenceProvider([AgentShipError("rate limit")]),
+            ProviderConfig("codex", limit_poll_seconds=5, limit_max_wait_seconds=10),
+            sleeper=lambda _: None,
+            clock=lambda: next(times),
+            notifier=lambda _: None,
+        )
+        with self.assertRaisesRegex(AgentShipError, "did not clear"):
+            provider.invoke("work", repo=Path("."), write=False)
 
 
 if __name__ == "__main__":
