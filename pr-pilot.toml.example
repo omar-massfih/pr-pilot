@@ -1,0 +1,26 @@
+# Repository where feature branches and pull requests will be created.
+repo = "/absolute/path/to/your/repository"
+state_dir = "~/.pr-pilot"
+
+[implementer]
+name = "codex" # "codex" or "cursor"
+# model = "optional-model-name"
+
+[reviewer]
+name = "cursor" # A different provider is optional, but gives stronger independence.
+# model = "optional-model-name"
+
+[github]
+base_branch = "main"
+draft = true
+
+[babysit]
+enabled = true
+interval_seconds = 30
+max_cycles = 60
+max_fix_attempts = 3
+require_approval = false
+
+[telegram]
+token_env = "TELEGRAM_BOT_TOKEN"
+allowed_chat_ids = [123456789]

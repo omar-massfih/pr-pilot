@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-pilot"
+version = "0.1.0"
+description = "Turn feature requests into reviewed pull requests with Codex or Cursor."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "PR Pilot contributors" }]
+dependencies = []
+
+[project.scripts]
+pr-pilot = "pr_pilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
