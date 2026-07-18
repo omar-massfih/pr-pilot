@@ -64,7 +64,7 @@ class ProviderTests(unittest.TestCase):
             )
         self.assertEqual(output, "looks good")
         mocked.assert_called_once_with(
-            "review this", Path("."), allow_writes=False, model="gpt-5.5"
+            "review this", Path("."), allow_writes=False, model="gpt-5.5", effort="low"
         )
 
     def test_chatgpt_write_role_enables_writes(self):
@@ -75,6 +75,15 @@ class ProviderTests(unittest.TestCase):
                 "implement", repo=Path("/repo"), write=True
             )
         self.assertTrue(mocked.call_args.kwargs["allow_writes"])
+
+    def test_chatgpt_forwards_reasoning_effort(self):
+        with patch(
+            "pr_pilot.providers.run_chatgpt_agent", return_value="ok"
+        ) as mocked:
+            ChatGptProvider(ProviderConfig("chatgpt", reasoning_effort="medium")).invoke(
+                "review", repo=Path("."), write=False
+            )
+        self.assertEqual(mocked.call_args.kwargs["effort"], "medium")
 
     def test_make_provider_wires_chatgpt(self):
         provider = make_provider(ProviderConfig("chatgpt"))

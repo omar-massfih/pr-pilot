@@ -360,7 +360,7 @@ class AgentLoopTests(unittest.TestCase):
                 "Looking.\n" + _actions_block([{"op": "read", "path": "foo.py"}]),
                 "Done reviewing.\nVERDICT: APPROVE",
             ])
-            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: next(replies)):
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None, **_kw: next(replies)):
                 result = chatgpt.run_chatgpt_agent("review", repo, allow_writes=False)
             self.assertEqual(result, "Done reviewing.\nVERDICT: APPROVE")
 
@@ -373,7 +373,7 @@ class AgentLoopTests(unittest.TestCase):
                 ),
                 "Added feature.py with VALUE.",
             ])
-            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: next(replies)):
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None, **_kw: next(replies)):
                 result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
             self.assertEqual((repo / "feature.py").read_text(), "VALUE = 42\n")
             self.assertIn("feature.py", result)
@@ -383,7 +383,7 @@ class AgentLoopTests(unittest.TestCase):
             repo = Path(directory)
             # Always asks for another action — never finishes on its own.
             never_done = "working\n" + _actions_block([{"op": "list", "path": "."}])
-            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: never_done):
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None, **_kw: never_done):
                 result = chatgpt.run_chatgpt_agent(
                     "loop", repo, allow_writes=False, max_rounds=3
                 )
@@ -399,7 +399,7 @@ class AgentLoopTests(unittest.TestCase):
                 ),
                 "Done, added f.py.",
             ])
-            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: next(replies)):
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None, **_kw: next(replies)):
                 result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
             self.assertEqual((repo / "f.py").read_text(), "x = 1\n")
             self.assertIn("f.py", result)
@@ -407,7 +407,7 @@ class AgentLoopTests(unittest.TestCase):
     def test_implementer_may_declare_no_change_without_nudging(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: "NO_CHANGE"):
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None, **_kw: "NO_CHANGE"):
                 result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
             self.assertEqual(result, "NO_CHANGE")
 
@@ -416,7 +416,7 @@ class AgentLoopTests(unittest.TestCase):
             repo = Path(directory)
             calls = {"n": 0}
 
-            def once(prompt, model=None):
+            def once(prompt, model=None, **_kw):
                 calls["n"] += 1
                 return "Here is my review.\nVERDICT: APPROVE"
 
@@ -436,7 +436,7 @@ class AgentLoopTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-m", "i"], cwd=repo, check=True, capture_output=True)
             seen = []
 
-            def fake(prompt, model=None):
+            def fake(prompt, model=None, **_kw):
                 seen.append(prompt)
                 return "done"
 
@@ -453,7 +453,7 @@ class AgentLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             forever = "working\n" + _actions_block([{"op": "list", "path": "."}])
-            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: forever):
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None, **_kw: forever):
                 with self.assertRaisesRegex(AgentShipError, "budget"):
                     # Zero budget: the deadline check trips before any round runs.
                     chatgpt.run_chatgpt_agent(
@@ -471,7 +471,7 @@ class AgentLoopTests(unittest.TestCase):
                 "done",
             ])
 
-            def fake(prompt, model=None):
+            def fake(prompt, model=None, **_kw):
                 seen.append(prompt)
                 return next(replies)
 
@@ -479,6 +479,59 @@ class AgentLoopTests(unittest.TestCase):
                 chatgpt.run_chatgpt_agent("task", repo, allow_writes=False)
             # The second prompt must carry the file contents observed in round 1.
             self.assertIn("SENTINEL", seen[1])
+
+
+class PayloadFieldsTests(unittest.TestCase):
+    def test_reasoning_and_cache_key_added_when_set(self):
+        payload = chatgpt.build_payload("hi", "gpt-5.5", effort="low", cache_key="abc")
+        self.assertEqual(payload["reasoning"], {"effort": "low"})
+        self.assertEqual(payload["prompt_cache_key"], "abc")
+
+    def test_reasoning_and_cache_key_absent_by_default(self):
+        payload = chatgpt.build_payload("hi", "gpt-5.5")
+        self.assertNotIn("reasoning", payload)
+        self.assertNotIn("prompt_cache_key", payload)
+
+
+class ComposeTranscriptTests(unittest.TestCase):
+    def test_keeps_prefix_and_recent_rounds_dropping_oldest(self):
+        rounds = ["A" * 50, "B" * 50, "C" * 50]
+        out = chatgpt._compose_transcript("PREFIX", rounds, limit=len("PREFIX") + 120)
+        self.assertTrue(out.startswith("PREFIX"))
+        self.assertIn("C" * 50, out)  # newest kept
+        self.assertIn("B" * 50, out)
+        self.assertNotIn("A" * 50, out)  # oldest dropped
+        self.assertIn("older observations dropped", out)
+
+    def test_no_marker_when_everything_fits(self):
+        self.assertEqual(chatgpt._compose_transcript("P", ["x", "y"], limit=1000), "Pxy")
+
+    def test_keeps_the_newest_round_even_if_it_alone_exceeds_the_limit(self):
+        out = chatgpt._compose_transcript("P", ["huge" * 100], limit=5)
+        self.assertIn("huge", out)
+
+
+class AgentLoopCacheTests(unittest.TestCase):
+    def test_reuses_one_cache_key_and_forwards_effort_every_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "f.py").write_text("x = 1\n")
+            calls = []
+            replies = iter([
+                "look\n" + _actions_block([{"op": "read", "path": "f.py"}]),
+                "done",
+            ])
+
+            def fake(prompt, model=None, effort=None, cache_key=None):
+                calls.append((effort, cache_key))
+                return next(replies)
+
+            with patch("pr_pilot.chatgpt.run_chatgpt", fake):
+                chatgpt.run_chatgpt_agent("t", repo, allow_writes=False, effort="low")
+            self.assertEqual({effort for effort, _ in calls}, {"low"})
+            keys = {key for _, key in calls}
+            self.assertEqual(len(keys), 1)  # same cache key across both rounds
+            self.assertTrue(all(keys))  # and it is non-empty
 
 
 if __name__ == "__main__":

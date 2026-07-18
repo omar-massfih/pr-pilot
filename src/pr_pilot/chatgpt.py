@@ -197,9 +197,17 @@ def access_token(force_refresh: bool = False) -> tuple[str, str]:
         return token, _account_id(auth)
 
 
-def build_payload(prompt: str, model: str) -> dict:
-    """The Responses-API-shaped request body. Streaming is mandatory here."""
-    return {
+def build_payload(
+    prompt: str, model: str, *, effort: str | None = None, cache_key: str | None = None
+) -> dict:
+    """The Responses-API-shaped request body. Streaming is mandatory here.
+
+    ``effort`` sets ``reasoning.effort`` (lower = less thinking time per round,
+    the main latency lever); ``cache_key`` sets ``prompt_cache_key`` so the
+    stable prompt prefix is reliably cache-hit across the loop's resends. Both
+    are fields codex itself sends to this endpoint.
+    """
+    payload: dict = {
         "model": model,
         "instructions": _INSTRUCTIONS,
         "input": [
@@ -212,6 +220,11 @@ def build_payload(prompt: str, model: str) -> dict:
         "stream": True,
         "store": False,
     }
+    if effort:
+        payload["reasoning"] = {"effort": effort}
+    if cache_key:
+        payload["prompt_cache_key"] = cache_key
+    return payload
 
 
 def build_headers(token: str, account_id: str, session_id: str) -> dict:
@@ -265,20 +278,26 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     return f"HTTP {exc.code}: {body or exc.reason}"
 
 
-def _open_stream(prompt: str, model: str):
+def _open_stream(
+    prompt: str, model: str, *, effort: str | None = None, cache_key: str | None = None
+):
     """POST the prompt and return the live SSE response (caller closes it).
 
     A 401 gets one forced token refresh and retry — the JWT can be revoked
-    server-side before its ``exp``.
+    server-side before its ``exp``. ``cache_key`` doubles as the ``session_id``
+    header so all rounds of one run share a session (better prefix caching).
     """
-    payload = json.dumps(build_payload(prompt, model)).encode()
+    payload = json.dumps(
+        build_payload(prompt, model, effort=effort, cache_key=cache_key)
+    ).encode()
+    session_id = cache_key or str(uuid.uuid4())
     for attempt in (0, 1):
         token, account = access_token(force_refresh=attempt > 0)
         request = urllib.request.Request(
             _RESPONSES_URL,
             data=payload,
             method="POST",
-            headers=build_headers(token, account, str(uuid.uuid4())),
+            headers=build_headers(token, account, session_id),
         )
         try:
             return urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS)
@@ -297,9 +316,17 @@ def _open_stream(prompt: str, model: str):
     raise AssertionError("unreachable")
 
 
-def run_chatgpt(prompt: str, model: str | None = None) -> str:
+def run_chatgpt(
+    prompt: str,
+    model: str | None = None,
+    *,
+    effort: str | None = None,
+    cache_key: str | None = None,
+) -> str:
     """Run one turn against the chatgpt.com backend and return the reply text."""
-    response = _open_stream(prompt, model or DEFAULT_MODEL)
+    response = _open_stream(
+        prompt, model or DEFAULT_MODEL, effort=effort, cache_key=cache_key
+    )
     parts: list[str] = []
     completed = False
     failure: str | None = None
@@ -531,36 +558,71 @@ def _execute_action(action: dict, repo: Path, allow_writes: bool) -> str:
         return f"error: {exc}"
 
 
+def _compose_transcript(
+    prefix: str, rounds: list[str], limit: int = _MAX_TRANSCRIPT_CHARS
+) -> str:
+    """``prefix`` + the most recent rounds that fit, dropping the oldest.
+
+    The prefix (protocol + repo tree + task) is always kept, and so are the
+    newest rounds — the model never loses the files it just read, which is what
+    stops it re-reading them. Only stale middle rounds are dropped.
+    """
+    budget = limit - len(prefix)
+    if budget <= 0:
+        return prefix
+    kept: list[str] = []
+    total = 0
+    dropped = False
+    for rnd in reversed(rounds):
+        if kept and total + len(rnd) > budget:
+            dropped = True
+            break
+        kept.append(rnd)
+        total += len(rnd)
+    kept.reverse()
+    marker = "\n\n[… older observations dropped …]" if dropped else ""
+    return prefix + marker + "".join(kept)
+
+
 def run_chatgpt_agent(
     prompt: str,
     repo: Path,
     *,
     allow_writes: bool,
     model: str | None = None,
+    effort: str | None = None,
     max_rounds: int = _MAX_ROUNDS,
     max_seconds: float = _MAX_AGENT_SECONDS,
 ) -> str:
     """Drive the model through inspect/edit rounds; return its final answer.
 
-    The conversation is stateless on the backend (``store=false``), so the whole
-    transcript is resent each round (bounded by ``_MAX_TRANSCRIPT_CHARS``). The
-    loop ends when the model replies without an actions block, or when
-    ``max_rounds`` is hit — for a writing role the caller then checks the working
-    tree, so a truncated run still leaves real edits behind. A per-invocation
-    wall-clock budget (``max_seconds``) stops a runaway phase; every round is
-    logged at INFO so progress is visible in the service journal.
+    The conversation is stateless on the backend (``store=false``), so each
+    round resends a transcript composed of a stable prefix (protocol + repo
+    tree + task) plus the most recent rounds that fit in ``_MAX_TRANSCRIPT_CHARS``
+    (see :func:`_compose_transcript`). The loop ends when the model replies
+    without an actions block, or when ``max_rounds`` is hit — for a writing role
+    the caller then checks the working tree, so a truncated run still leaves real
+    edits behind. A per-invocation wall-clock budget (``max_seconds``) stops a
+    runaway phase; every round is logged at INFO. ``effort`` sets the model's
+    reasoning effort (lower = faster); one ``cache_key`` is reused for every
+    round so the prefix stays cache-hot.
     """
     repo = Path(repo)
     role = "write" if allow_writes else "read"
     protocol = _WRITE_PROTOCOL if allow_writes else _READ_PROTOCOL
     tree = _repo_tree(repo)
     layout = f"\n\n--- REPOSITORY FILES ---\n{tree}" if tree else ""
-    transcript = f"{protocol}{layout}\n\n--- TASK ---\n{prompt}"
+    prefix = f"{protocol}{layout}\n\n--- TASK ---\n{prompt}"
+    rounds: list[str] = []
     last_prose = ""
     wrote = False  # did any write/delete actually land?
     nudges = 0
+    cache_key = str(uuid.uuid4())
     started = time.monotonic()
-    logger.info("agent loop start: role=%s max_rounds=%d budget=%.0fs", role, max_rounds, max_seconds)
+    logger.info(
+        "agent loop start: role=%s max_rounds=%d budget=%.0fs effort=%s",
+        role, max_rounds, max_seconds, effort or "default",
+    )
     for round_num in range(1, max_rounds + 1):
         elapsed = time.monotonic() - started
         if elapsed > max_seconds:
@@ -568,7 +630,8 @@ def run_chatgpt_agent(
                 f"agent loop ({role}) exceeded its {max_seconds:.0f}s budget "
                 f"after {round_num - 1} rounds"
             )
-        reply = run_chatgpt(transcript, model=model)
+        transcript = _compose_transcript(prefix, rounds)
+        reply = run_chatgpt(transcript, model=model, effort=effort, cache_key=cache_key)
         prose, actions = _parse_actions(reply)
         last_prose = prose or last_prose
         if actions is None:  # no fenced block — the model thinks it is done
@@ -580,15 +643,13 @@ def run_chatgpt_agent(
                     and prose.strip().upper() != "NO_CHANGE":
                 nudges += 1
                 logger.info("implementer finished without writing; nudge %d/%d", nudges, _MAX_WRITE_NUDGES)
-                transcript = _clip(
-                    transcript
-                    + f"\n\n--- ASSISTANT ---\n{reply}"
+                rounds.append(
+                    f"\n\n--- ASSISTANT ---\n{reply}"
                     + "\n\n--- OBSERVATION ---\n"
                     + "You have not created or edited any files, so nothing is "
                     "implemented yet. Emit write actions to make the change now. "
                     "Only if no code change is genuinely required, reply with "
-                    "exactly NO_CHANGE.",
-                    _MAX_TRANSCRIPT_CHARS,
+                    "exactly NO_CHANGE."
                 )
                 continue
             logger.info(
@@ -601,13 +662,11 @@ def run_chatgpt_agent(
         ) if actions else "(empty block)"
         logger.info("agent round %d/%d (%s): %s", round_num, max_rounds, role, ops[:300])
         if not actions:
-            transcript = _clip(
-                transcript
-                + f"\n\n--- ASSISTANT ---\n{reply}"
+            rounds.append(
+                f"\n\n--- ASSISTANT ---\n{reply}"
                 + "\n\n--- OBSERVATION ---\n"
                 + "error: the actions block was empty or malformed JSON. Send a "
-                "valid JSON array, or answer in plain text with no block if done.",
-                _MAX_TRANSCRIPT_CHARS,
+                "valid JSON array, or answer in plain text with no block if done."
             )
             continue
         observations = []
@@ -617,12 +676,10 @@ def run_chatgpt_agent(
                 wrote = True
             label = action.get("path") or action.get("op")
             observations.append(f"[{action.get('op')} {label}]\n{result}")
-        transcript = _clip(
-            transcript
-            + f"\n\n--- ASSISTANT ---\n{reply}"
+        rounds.append(
+            f"\n\n--- ASSISTANT ---\n{reply}"
             + "\n\n--- OBSERVATION ---\n"
-            + "\n\n".join(observations),
-            _MAX_TRANSCRIPT_CHARS,
+            + "\n\n".join(observations)
         )
     logger.info("agent loop hit max_rounds=%d (role=%s)", max_rounds, role)
     return last_prose or "Reached the maximum number of agent rounds."

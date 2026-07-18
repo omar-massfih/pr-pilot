@@ -14,6 +14,9 @@ class ProviderConfig:
     model: str | None = None
     limit_poll_seconds: int = 60
     limit_max_wait_seconds: int = 0
+    # chatgpt provider only: reasoning effort per round. Lower is faster;
+    # "low" is the default for responsiveness (higher = slower, more thorough).
+    reasoning_effort: str = "low"
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,7 @@ def _provider(data: dict, default: str = "codex") -> ProviderConfig:
         model=data.get("model"),
         limit_poll_seconds=int(data.get("limit_poll_seconds", 60)),
         limit_max_wait_seconds=int(data.get("limit_max_wait_seconds", 0)),
+        reasoning_effort=str(data.get("reasoning_effort", "low")),
     )
 
 
@@ -146,6 +150,10 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         if provider.limit_poll_seconds <= 0 or provider.limit_max_wait_seconds < 0:
             raise AgentShipError(
                 "provider limit_poll_seconds must be positive and limit_max_wait_seconds cannot be negative"
+            )
+        if provider.reasoning_effort not in {"minimal", "low", "medium", "high"}:
+            raise AgentShipError(
+                "provider reasoning_effort must be minimal, low, medium, or high"
             )
     if config.memory.profile_provider not in {
         "implementer", "reviewer", "codex", "cursor", "chatgpt",

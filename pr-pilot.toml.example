@@ -10,6 +10,9 @@ state_dir = "~/.pr-pilot"
 [implementer]
 name = "codex"
 # model = "optional-model-name"
+# chatgpt only — reasoning effort per round: minimal | low | medium | high.
+# Lower is faster; "low" (default) trades some thoroughness for speed.
+# reasoning_effort = "low"
 limit_poll_seconds = 60
 limit_max_wait_seconds = 0 # 0 waits indefinitely; Ctrl-C still stops immediately.
 

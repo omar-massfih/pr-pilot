@@ -62,6 +62,30 @@ allowed_chat_ids = [42]
             self.assertEqual(config.implementer.name, "chatgpt")
             self.assertEqual(config.reviewer.name, "chatgpt")
 
+    def test_reasoning_effort_defaults_low_and_parses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(f'repo = "{root}"\n')
+            self.assertEqual(load_config(config_file).implementer.reasoning_effort, "low")
+            config_file.write_text(
+                f'repo = "{root}"\n[implementer]\n'
+                'name = "chatgpt"\nreasoning_effort = "medium"\n'
+            )
+            self.assertEqual(
+                load_config(config_file).implementer.reasoning_effort, "medium"
+            )
+
+    def test_invalid_reasoning_effort_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'repo = "{root}"\n[implementer]\nreasoning_effort = "turbo"\n'
+            )
+            with self.assertRaisesRegex(AgentShipError, "reasoning_effort"):
+                load_config(config_file)
+
     def test_chatgpt_profile_provider_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

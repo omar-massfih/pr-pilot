@@ -74,7 +74,8 @@ class ChatGptProvider(AgentProvider):
 
     def invoke(self, prompt: str, *, repo: Path, write: bool) -> str:
         return run_chatgpt_agent(
-            prompt, repo, allow_writes=write, model=self.config.model
+            prompt, repo, allow_writes=write,
+            model=self.config.model, effort=self.config.reasoning_effort,
         )
 
 
