@@ -73,8 +73,8 @@ class TelegramLoopTests(unittest.TestCase):
         bot._handle(_msg("/auto"))
         self.assertEqual(bot.pending, "First feature")
         bot._handle(_msg("/yes"))
-        # First feature was built (watch disabled to stay responsive)...
-        self.assertEqual(workflow.runs, [("First feature", False)])
+        # First feature was built and its PR babysat through CI...
+        self.assertEqual(workflow.runs, [("First feature", True)])
         # ...and the loop continued by proposing the next one.
         self.assertEqual(bot.pending, "Second feature")
         self.assertTrue(any("Finished" in text for text in self.sent))
@@ -109,7 +109,7 @@ class TelegramLoopTests(unittest.TestCase):
     def test_explicit_feature_builds_immediately(self):
         bot, workflow = self._bot([])
         bot._handle(_msg("/feature Add retry to the client"))
-        self.assertEqual(workflow.runs, [("Add retry to the client", False)])
+        self.assertEqual(workflow.runs, [("Add retry to the client", True)])
 
     def test_feature_without_description_is_rejected(self):
         bot, workflow = self._bot([])

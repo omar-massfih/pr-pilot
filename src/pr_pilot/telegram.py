@@ -134,11 +134,11 @@ class TelegramBot:
         self._suggest(chat_id)
 
     def _build(self, chat_id: int, feature: str) -> None:
-        self.send(chat_id, "Accepted. Planning and implementation have started — this can take a few minutes.")
+        self.send(chat_id, "Accepted. Planning, implementation, and CI babysitting have started — this can take a while.")
         try:
-            # watch=False: open the draft PR and return so the loop stays
-            # responsive instead of blocking on CI babysitting.
-            state = self._workflow_instance().run(feature, watch=False)
+            # watch=True: after opening the PR, babysit CI and address failures
+            # before the loop moves on to the next suggestion.
+            state = self._workflow_instance().run(feature, watch=True)
             self.send(chat_id, f"✅ Finished: {state.pr_url}\nState: {state.phase}")
         except Exception as exc:
             self.send(chat_id, f"Run stopped: {exc}")
