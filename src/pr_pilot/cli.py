@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 from dataclasses import replace
@@ -98,6 +99,12 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # INFO to stderr so a long-running `telegram`/`auto` service shows activity
+    # in journalctl (commands, run phases, outcomes). Harmless for one-shots.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     args = parser().parse_args(argv)
     try:
         config = load_config(args.config, args.repo)

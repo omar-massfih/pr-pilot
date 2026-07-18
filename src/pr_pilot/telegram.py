@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.parse
 import urllib.request
@@ -9,6 +10,8 @@ from collections.abc import Callable
 from .config import Config
 from .errors import AgentShipError
 from .workflow import Workflow
+
+logger = logging.getLogger(__name__)
 
 HELP = (
     "PR Pilot commands:\n"
@@ -52,6 +55,10 @@ class TelegramBot:
         self.offset = 0
 
     def serve_forever(self) -> None:
+        logger.info(
+            "telegram bot polling; repo=%s allowed_chats=%d",
+            self.config.repo, len(self.allowed),
+        )
         while True:
             updates = self._call("getUpdates", {"timeout": 30, "offset": self.offset})["result"]
             for update in updates:
@@ -71,7 +78,10 @@ class TelegramBot:
         text = str(message.get("text") or "").strip()
         if chat_id not in self.allowed:
             return
+        if chat_id == 0:
+            return
         command = text.split(maxsplit=1)[0].lower() if text else ""
+        logger.info("command %r from chat %s", command or "(empty)", chat_id)
         if command in ("/start", "/help", ""):
             self.send(chat_id, HELP)
         elif command == "/auto":
@@ -93,13 +103,37 @@ class TelegramBot:
         else:
             self.send(chat_id, HELP)
 
+    def _recover(self) -> None:
+        """Best-effort return to a clean base after a failed run.
+
+        Without this a stopped run leaves a dirty worktree that blocks every
+        later suggestion/build, wedging the loop until someone cleans up by hand.
+        """
+        try:
+            self._workflow_instance().reset_worktree()
+            logger.info("worktree reset to a clean base after a failed run")
+        except Exception:
+            logger.exception("worktree reset failed")
+
     def _suggest(self, chat_id: int) -> None:
         self.send(chat_id, "Looking for the next feature to suggest…")
-        try:
-            feature = self._workflow_instance().recommend_feature()
-        except Exception as exc:
+        wf = self._workflow_instance()
+        feature = None
+        error: Exception | None = None
+        # A prior failure may have left the tree dirty; recover once and retry.
+        for attempt in (0, 1):
+            try:
+                feature = wf.recommend_feature()
+                error = None
+                break
+            except Exception as exc:
+                error = exc
+                logger.warning("recommend_feature failed (attempt %d): %s", attempt, exc)
+                if attempt == 0:
+                    self._recover()
+        if error is not None:
             self.pending = None
-            self.send(chat_id, f"Could not suggest a feature: {exc}")
+            self.send(chat_id, f"Could not suggest a feature: {error}")
             return
         if not feature:
             self.pending = None
@@ -110,6 +144,7 @@ class TelegramBot:
             )
             return
         self.pending = feature
+        logger.info("suggested feature: %s", feature)
         self.send(
             chat_id,
             f"💡 Suggested feature:\n\n{feature}\n\n"
@@ -135,12 +170,17 @@ class TelegramBot:
 
     def _build(self, chat_id: int, feature: str) -> None:
         self.send(chat_id, "Accepted. Planning, implementation, and CI babysitting have started — this can take a while.")
+        logger.info("building feature: %s", feature)
         try:
             # watch=True: after opening the PR, babysit CI and address failures
             # before the loop moves on to the next suggestion.
             state = self._workflow_instance().run(feature, watch=True)
+            logger.info("build finished: phase=%s pr=%s", state.phase, state.pr_url)
             self.send(chat_id, f"✅ Finished: {state.pr_url}\nState: {state.phase}")
         except Exception as exc:
+            logger.warning("run stopped: %s", exc)
+            # Clear the failed run's partial edits so the loop can continue.
+            self._recover()
             self.send(chat_id, f"Run stopped: {exc}")
 
     def send(self, chat_id: int, text: str) -> None:

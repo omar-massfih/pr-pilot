@@ -132,6 +132,10 @@ class Workflow:
         self.memory = memory
         self.sleep = sleeper
 
+    def reset_worktree(self) -> None:
+        """Return the repo to a clean base branch (see GitRepo.reset_to_base)."""
+        self.repo.reset_to_base(self.config.github.base_branch)
+
     def recommend_feature(self) -> str | None:
         self.repo.validate()
         self.repo.checkout_base(self.config.github.base_branch)

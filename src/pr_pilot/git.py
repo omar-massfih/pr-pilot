@@ -36,6 +36,18 @@ class GitRepo:
     def has_changes(self) -> bool:
         return bool(self.status())
 
+    def reset_to_base(self, base: str) -> None:
+        """Discard all working-tree changes and return to a clean base branch.
+
+        A run that stops before publishing (review limit, agent error) leaves
+        uncommitted edits behind, which would block every later run's clean-tree
+        check. Resetting here lets an autonomous loop recover instead of wedging.
+        Nothing is pushed until publishing, so only throwaway local work is lost.
+        """
+        run(["git", "reset", "--hard"], cwd=self.path)
+        run(["git", "clean", "-fd"], cwd=self.path)
+        self.checkout_base(base)
+
     def fingerprint(self) -> str:
         """Hash tracked diffs and untracked content to detect writes by read-only agents."""
         digest = hashlib.sha256()

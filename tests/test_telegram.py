@@ -24,8 +24,12 @@ class FakeWorkflow:
         self.recommended = 0
         self.runs = []
         self.raise_on_run = False
+        self.resets = 0
+        self.dirty = False  # when True, recommend fails until reset_worktree runs
 
     def recommend_feature(self):
+        if self.dirty:
+            raise RuntimeError("Repository has uncommitted changes")
         if self.recommended < len(self.suggestions):
             value = self.suggestions[self.recommended]
             self.recommended += 1
@@ -34,9 +38,14 @@ class FakeWorkflow:
 
     def run(self, feature, *, watch=None):
         if self.raise_on_run:
+            self.dirty = True  # a failed run leaves the worktree dirty
             raise RuntimeError("boom")
         self.runs.append((feature, watch))
         return FakeState(feature)
+
+    def reset_worktree(self):
+        self.resets += 1
+        self.dirty = False
 
 
 def _msg(text, chat_id=CHAT):
@@ -123,14 +132,35 @@ class TelegramLoopTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertIsNone(bot.pending)
 
-    def test_build_failure_is_reported_and_loop_continues(self):
+    def test_build_failure_resets_worktree_and_loop_continues(self):
         bot, workflow = self._bot(["First", "Second"])
         workflow.raise_on_run = True
         bot._handle(_msg("/auto"))
         bot._handle(_msg("/yes"))
         self.assertTrue(any("Run stopped" in text for text in self.sent))
-        # Even after a failed build, the loop offers the next suggestion.
+        # The failed run left the tree dirty; the bot reset it...
+        self.assertGreaterEqual(workflow.resets, 1)
+        # ...so the loop could still offer the next suggestion.
         self.assertEqual(bot.pending, "Second")
+
+    def test_suggest_self_heals_a_dirty_worktree(self):
+        bot, workflow = self._bot(["Recovered feature"])
+        workflow.dirty = True  # e.g. a crash left leftovers before this /auto
+        bot._handle(_msg("/auto"))
+        # recommend failed once, reset ran, retry succeeded.
+        self.assertEqual(workflow.resets, 1)
+        self.assertEqual(bot.pending, "Recovered feature")
+
+    def test_suggest_reports_when_recovery_does_not_help(self):
+        bot, workflow = self._bot([])
+
+        def always_broken():
+            raise RuntimeError("git exploded")
+
+        workflow.recommend_feature = always_broken
+        bot._handle(_msg("/auto"))
+        self.assertIsNone(bot.pending)
+        self.assertTrue(any("Could not suggest" in text for text in self.sent))
 
 
 if __name__ == "__main__":
