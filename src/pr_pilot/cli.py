@@ -6,6 +6,7 @@ import logging
 import shutil
 import sys
 from dataclasses import replace
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from .config import load_config
@@ -14,6 +15,38 @@ from .memory import MemoryService, RELATION_TYPES
 from .state import StateStore
 from .telegram import TelegramBot
 from .workflow import Workflow
+
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+# On-disk log ceiling: one active file plus its rotations. ~2 MB × (3 + 1) ≈ 8 MB
+# total, so a long-running Telegram/auto service can't fill the disk.
+_LOG_MAX_BYTES = 2_000_000
+_LOG_BACKUPS = 3
+
+
+def _setup_file_logging(state_dir: Path) -> None:
+    """Persist the INFO log to a size-capped rotating file beside the run state.
+
+    stderr already carries INFO (for `journalctl` / an attached terminal), but
+    that stream is gone once the process exits — so a run's rounds, nudges, and
+    outcomes can't be inspected after the fact. This adds a bounded on-disk copy
+    (``state_dir/pr-pilot.log``, rotated) that survives. Best-effort: a log we
+    can't open must never take the CLI down.
+    """
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            state_dir / "pr-pilot.log",
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUPS,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        logging.getLogger().addHandler(handler)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "could not open log file under %s: %s", state_dir, exc
+        )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -101,13 +134,12 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     # INFO to stderr so a long-running `telegram`/`auto` service shows activity
     # in journalctl (commands, run phases, outcomes). Harmless for one-shots.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
     args = parser().parse_args(argv)
     try:
         config = load_config(args.config, args.repo)
+        # Now that state_dir is known, mirror the INFO log to a bounded file there.
+        _setup_file_logging(config.state_dir)
         if args.command == "doctor":
             return doctor(config)
         if args.command == "project":
