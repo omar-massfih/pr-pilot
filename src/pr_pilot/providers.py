@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .chatgpt import run_chatgpt
+from .chatgpt import run_chatgpt_agent
 from .commands import run
 from .config import ProviderConfig
 from .errors import AgentShipError
@@ -63,21 +63,19 @@ class CursorProvider(AgentProvider):
 class ChatGptProvider(AgentProvider):
     """chatgpt.com's backend over HTTP, reusing the Codex CLI's OAuth tokens.
 
-    Text-only: it returns a reply but cannot edit files, so it only serves
-    read-only roles (reviewer, memory profiling) — config validation rejects
-    it as implementer, and ``write=True`` is refused here as a second guard.
+    The backend has no native tools, so file work is emulated by an agent loop
+    (:func:`run_chatgpt_agent`): the model inspects the repo through read ops
+    and, for writing roles, edits it through write/delete ops. Serves every
+    role — planner and reviewer with writes disabled, implementer with them on.
     """
 
     def __init__(self, config: ProviderConfig):
         self.config = config
 
     def invoke(self, prompt: str, *, repo: Path, write: bool) -> str:
-        if write:
-            raise AgentShipError(
-                "The chatgpt provider is text-only and cannot edit files; "
-                "use codex or cursor for writing roles."
-            )
-        return run_chatgpt(prompt, model=self.config.model)
+        return run_chatgpt_agent(
+            prompt, repo, allow_writes=write, model=self.config.model
+        )
 
 
 class LimitRetryProvider(AgentProvider):

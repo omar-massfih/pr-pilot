@@ -3,10 +3,17 @@
 Reuses the ChatGPT OAuth tokens the Codex CLI keeps in ``$CODEX_HOME/auth.json``
 (``codex login``), so there is no API key and usage is billed to the ChatGPT
 plan. The endpoint is the same private one the Codex CLI itself drives —
-unofficial, so everything that touches it lives in this one module. Unlike the
-codex/cursor CLI providers this is text-only: it returns a reply and cannot
-edit files, which is why only read-only roles (reviewer, memory profiling) may
-use it.
+unofficial, so everything that touches it lives in this one module.
+
+Two entry points:
+
+- :func:`run_chatgpt` — one plain text turn (memory profiling, simple asks).
+- :func:`run_chatgpt_agent` — an agent loop that lets the model inspect and
+  (optionally) edit a repository. The backend has no native tools, so the
+  model drives the repo through a fenced ``actions`` block that this module
+  parses and executes, feeding results back until the model answers with no
+  further actions. With ``allow_writes=False`` only read ops run (planner,
+  reviewer); with ``allow_writes=True`` it can also edit files (implementer).
 
 Failures raise :class:`AgentShipError`; HTTP status codes are kept in the
 message so ``LimitRetryProvider`` recognizes 429s as limit errors.
@@ -18,6 +25,8 @@ import base64
 import binascii
 import json
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -316,3 +325,230 @@ def run_chatgpt(prompt: str, model: str | None = None) -> str:
     if not completed and not parts:
         raise AgentShipError("chatgpt.com stream ended without any reply text.")
     return "".join(parts).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Agent loop — file inspection / editing over the actions protocol
+# --------------------------------------------------------------------------- #
+
+# How the model asks to touch the repo. A JSON array in a fenced block; the
+# model appends one block per turn while it still needs to act, and answers
+# with NO block once it is finished.
+_ACTIONS_FENCE_RE = re.compile(
+    r"```[ \t]*actions[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE
+)
+
+_READ_OPS = ("list", "read", "search", "git_diff")
+_WRITE_OPS = ("write", "delete")
+
+# Bounds keep a single run — and the resent transcript — from exploding.
+_MAX_ROUNDS = 40
+_MAX_READ_BYTES = 12_000
+_MAX_OP_OUTPUT = 8_000
+_MAX_LIST_ENTRIES = 200
+_MAX_TRANSCRIPT_CHARS = 120_000
+
+_READ_PROTOCOL = """\
+You are working inside a git repository. You cannot see it until you ask.
+To inspect it, end your message with EXACTLY one fenced block and nothing after:
+```actions
+[{"op": "list", "path": "."}, {"op": "read", "path": "src/foo.py"}]
+```
+Read-only ops: list (directory entries), read (file text), search (ripgrep-style
+regex over tracked files: {"op": "search", "query": "def foo"}), git_diff (the
+current uncommitted working-tree diff, no args).
+Each result comes back as an "Observation". When you have seen enough, answer in
+plain text with NO actions block — that plain answer is your final response."""
+
+_WRITE_PROTOCOL = """\
+You are the implementation agent inside a git repository. You cannot see or edit
+it until you ask. End your message with EXACTLY one fenced block and nothing after:
+```actions
+[{"op": "read", "path": "src/foo.py"},
+ {"op": "write", "path": "src/foo.py", "content": "full new file contents"},
+ {"op": "delete", "path": "obsolete.py"}]
+```
+Read-only ops: list, read, search ({"op":"search","query":"regex"}), git_diff.
+Write ops: write (creates or fully overwrites a file with "content" — always send
+the complete file, never a patch), delete (remove a file). Paths are relative to
+the repo root and may not escape it.
+Make the smallest coherent change, update or add tests, and inspect before you
+edit. Each result comes back as an "Observation". When every intended change is
+written to disk, answer in plain text with NO actions block, summarizing what you
+changed — that plain answer ends the run."""
+
+
+def _parse_actions(text: str) -> tuple[str, list[dict] | None]:
+    """Split a reply into ``(prose, actions)``.
+
+    ``actions is None`` means the model emitted no fenced block — it is done and
+    ``prose`` is its final answer. An empty list means a block was present but
+    unusable (malformed / no valid ops); the caller nudges and retries.
+    """
+    match = _ACTIONS_FENCE_RE.search(text)
+    if match is None:
+        return text.strip(), None
+    prose = (text[: match.start()] + text[match.end() :]).strip()
+    try:
+        data = json.loads(match.group(1).strip())
+    except ValueError:
+        return prose, []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return prose, []
+    actions = [item for item in data if isinstance(item, dict) and item.get("op")]
+    return prose, actions
+
+
+def _safe_target(repo: Path, rel: str) -> Path:
+    """Resolve ``rel`` under ``repo``, rejecting traversal and the git dir."""
+    if not isinstance(rel, str) or not rel.strip():
+        raise AgentShipError("path is required")
+    target = (repo / rel).resolve()
+    root = repo.resolve()
+    if target != root and root not in target.parents:
+        raise AgentShipError(f"path escapes the repository: {rel}")
+    if ".git" in target.relative_to(root).parts:
+        raise AgentShipError("the .git directory is off limits")
+    return target
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n… [truncated, {len(text) - limit} more chars]"
+
+
+def _do_list(repo: Path, rel: str) -> str:
+    target = _safe_target(repo, rel or ".")
+    if not target.is_dir():
+        raise AgentShipError(f"not a directory: {rel}")
+    entries = []
+    for child in sorted(target.iterdir())[:_MAX_LIST_ENTRIES]:
+        if child.name == ".git":
+            continue
+        entries.append(child.name + ("/" if child.is_dir() else ""))
+    return "\n".join(entries) or "(empty)"
+
+
+def _do_read(repo: Path, rel: str) -> str:
+    target = _safe_target(repo, rel)
+    if not target.is_file():
+        raise AgentShipError(f"not a file: {rel}")
+    return _clip(target.read_text(encoding="utf-8", errors="replace"), _MAX_READ_BYTES)
+
+
+def _do_search(repo: Path, query: str) -> str:
+    if not isinstance(query, str) or not query:
+        raise AgentShipError("search needs a 'query'")
+    # git grep stays inside tracked files and honors .gitignore; -n adds line
+    # numbers. A non-match exits 1, which is a normal "nothing found" here.
+    proc = subprocess.run(
+        ["git", "grep", "-n", "-I", "-E", query],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode not in (0, 1):
+        raise AgentShipError((proc.stderr or "git grep failed").strip())
+    return _clip(proc.stdout, _MAX_OP_OUTPUT) if proc.stdout else "(no matches)"
+
+
+def _do_git_diff(repo: Path) -> str:
+    proc = subprocess.run(
+        ["git", "diff"], cwd=repo, text=True, capture_output=True
+    )
+    if proc.returncode != 0:
+        raise AgentShipError((proc.stderr or "git diff failed").strip())
+    return _clip(proc.stdout, _MAX_OP_OUTPUT) if proc.stdout.strip() else "(no changes yet)"
+
+
+def _do_write(repo: Path, rel: str, content: object) -> str:
+    if not isinstance(content, str):
+        raise AgentShipError("write needs string 'content'")
+    target = _safe_target(repo, rel)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return f"wrote {rel} ({len(content)} bytes)"
+
+
+def _do_delete(repo: Path, rel: str) -> str:
+    target = _safe_target(repo, rel)
+    if not target.is_file():
+        raise AgentShipError(f"not a file: {rel}")
+    target.unlink()
+    return f"deleted {rel}"
+
+
+def _execute_action(action: dict, repo: Path, allow_writes: bool) -> str:
+    op = str(action.get("op"))
+    if op in _WRITE_OPS and not allow_writes:
+        return f"error: '{op}' is not permitted in this read-only role"
+    try:
+        if op == "list":
+            return _do_list(repo, str(action.get("path", ".")))
+        if op == "read":
+            return _do_read(repo, str(action.get("path", "")))
+        if op == "search":
+            return _do_search(repo, action.get("query", ""))
+        if op == "git_diff":
+            return _do_git_diff(repo)
+        if op == "write":
+            return _do_write(repo, str(action.get("path", "")), action.get("content"))
+        if op == "delete":
+            return _do_delete(repo, str(action.get("path", "")))
+        return f"error: unknown op '{op}'"
+    except AgentShipError as exc:
+        return f"error: {exc}"
+
+
+def run_chatgpt_agent(
+    prompt: str,
+    repo: Path,
+    *,
+    allow_writes: bool,
+    model: str | None = None,
+    max_rounds: int = _MAX_ROUNDS,
+) -> str:
+    """Drive the model through inspect/edit rounds; return its final answer.
+
+    The conversation is stateless on the backend (``store=false``), so the whole
+    transcript is resent each round (bounded by ``_MAX_TRANSCRIPT_CHARS``). The
+    loop ends when the model replies without an actions block, or when
+    ``max_rounds`` is hit — for a writing role the caller then checks the working
+    tree, so a truncated run still leaves real edits behind.
+    """
+    repo = Path(repo)
+    protocol = _WRITE_PROTOCOL if allow_writes else _READ_PROTOCOL
+    transcript = f"{protocol}\n\n--- TASK ---\n{prompt}"
+    last_prose = ""
+    for _ in range(max_rounds):
+        reply = run_chatgpt(transcript, model=model)
+        prose, actions = _parse_actions(reply)
+        last_prose = prose or last_prose
+        if actions is None:  # no fenced block — the model is done
+            return prose
+        if not actions:
+            transcript = _clip(
+                transcript
+                + f"\n\n--- ASSISTANT ---\n{reply}"
+                + "\n\n--- OBSERVATION ---\n"
+                + "error: the actions block was empty or malformed JSON. Send a "
+                "valid JSON array, or answer in plain text with no block if done.",
+                _MAX_TRANSCRIPT_CHARS,
+            )
+            continue
+        observations = []
+        for action in actions:
+            result = _execute_action(action, repo, allow_writes)
+            label = action.get("path") or action.get("op")
+            observations.append(f"[{action.get('op')} {label}]\n{result}")
+        transcript = _clip(
+            transcript
+            + f"\n\n--- ASSISTANT ---\n{reply}"
+            + "\n\n--- OBSERVATION ---\n"
+            + "\n\n".join(observations),
+            _MAX_TRANSCRIPT_CHARS,
+        )
+    return last_prose or "Reached the maximum number of agent rounds."

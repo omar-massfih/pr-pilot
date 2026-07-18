@@ -55,20 +55,26 @@ class ProviderTests(unittest.TestCase):
             provider.invoke("fix", repo=Path(directory), write=True)
             self.assertIn("--force", mocked.call_args.args[0])
 
-    def test_chatgpt_delegates_reads_to_the_backend(self):
+    def test_chatgpt_read_role_runs_the_agent_loop_without_writes(self):
         with patch(
-            "pr_pilot.providers.run_chatgpt", return_value="looks good"
+            "pr_pilot.providers.run_chatgpt_agent", return_value="looks good"
         ) as mocked:
             output = ChatGptProvider(ProviderConfig("chatgpt", model="gpt-5.5")).invoke(
                 "review this", repo=Path("."), write=False
             )
         self.assertEqual(output, "looks good")
-        mocked.assert_called_once_with("review this", model="gpt-5.5")
+        mocked.assert_called_once_with(
+            "review this", Path("."), allow_writes=False, model="gpt-5.5"
+        )
 
-    def test_chatgpt_refuses_writing_roles(self):
-        provider = ChatGptProvider(ProviderConfig("chatgpt"))
-        with self.assertRaisesRegex(AgentShipError, "text-only"):
-            provider.invoke("fix it", repo=Path("."), write=True)
+    def test_chatgpt_write_role_enables_writes(self):
+        with patch(
+            "pr_pilot.providers.run_chatgpt_agent", return_value="shipped"
+        ) as mocked:
+            ChatGptProvider(ProviderConfig("chatgpt")).invoke(
+                "implement", repo=Path("/repo"), write=True
+            )
+        self.assertTrue(mocked.call_args.kwargs["allow_writes"])
 
     def test_make_provider_wires_chatgpt(self):
         provider = make_provider(ProviderConfig("chatgpt"))

@@ -136,12 +136,8 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         ),
         state_dir=Path(data.get("state_dir", "~/.pr-pilot")).expanduser(),
     )
-    # chatgpt is text-only (no file edits), so it can review but not implement.
-    if config.implementer.name not in {"codex", "cursor"}:
-        raise AgentShipError(
-            "implementer.name must be 'codex' or 'cursor' "
-            "(chatgpt cannot edit files)"
-        )
+    if config.implementer.name not in {"codex", "cursor", "chatgpt"}:
+        raise AgentShipError("implementer.name must be 'codex', 'cursor', or 'chatgpt'")
     if config.reviewer.name not in {"codex", "cursor", "chatgpt"}:
         raise AgentShipError("reviewer.name must be 'codex', 'cursor', or 'chatgpt'")
     if config.workflow.max_review_attempts < 0:

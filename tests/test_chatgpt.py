@@ -260,5 +260,154 @@ class RunChatGptTests(unittest.TestCase):
                     chatgpt.run_chatgpt("hi")
 
 
+def _actions_block(actions: list[dict]) -> str:
+    return "```actions\n" + json.dumps(actions) + "\n```"
+
+
+class ParseActionsTests(unittest.TestCase):
+    def test_no_block_means_done(self):
+        prose, actions = chatgpt._parse_actions("All finished.\nVERDICT: APPROVE")
+        self.assertIsNone(actions)
+        self.assertEqual(prose, "All finished.\nVERDICT: APPROVE")
+
+    def test_block_is_extracted_and_stripped_from_prose(self):
+        text = "Let me look.\n" + _actions_block([{"op": "read", "path": "a.py"}])
+        prose, actions = chatgpt._parse_actions(text)
+        self.assertEqual(prose, "Let me look.")
+        self.assertEqual(actions, [{"op": "read", "path": "a.py"}])
+
+    def test_malformed_json_yields_empty_list_not_none(self):
+        prose, actions = chatgpt._parse_actions("oops ```actions\n{not json\n```")
+        self.assertEqual(actions, [])
+
+    def test_single_object_is_wrapped(self):
+        _, actions = chatgpt._parse_actions(_actions_block([{"op": "list", "path": "."}])
+                                            .replace("[", "").replace("]", ""))
+        self.assertEqual(actions, [{"op": "list", "path": "."}])
+
+
+class SafeTargetTests(unittest.TestCase):
+    def test_rejects_parent_traversal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(AgentShipError, "escapes"):
+                chatgpt._safe_target(Path(directory), "../secret")
+
+    def test_rejects_git_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(AgentShipError, "\\.git"):
+                chatgpt._safe_target(Path(directory), ".git/config")
+
+    def test_accepts_nested_repo_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = chatgpt._safe_target(Path(directory), "src/pkg/mod.py")
+            self.assertTrue(str(target).endswith("src/pkg/mod.py"))
+
+
+class ExecuteActionTests(unittest.TestCase):
+    def test_write_then_read_roundtrips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            out = chatgpt._execute_action(
+                {"op": "write", "path": "pkg/new.py", "content": "x = 1\n"},
+                repo, allow_writes=True,
+            )
+            self.assertIn("wrote", out)
+            self.assertEqual((repo / "pkg/new.py").read_text(), "x = 1\n")
+            self.assertEqual(
+                chatgpt._execute_action({"op": "read", "path": "pkg/new.py"}, repo, True),
+                "x = 1\n",
+            )
+
+    def test_write_blocked_in_read_only_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            out = chatgpt._execute_action(
+                {"op": "write", "path": "f.py", "content": "bad"}, repo, allow_writes=False
+            )
+            self.assertIn("not permitted", out)
+            self.assertFalse((repo / "f.py").exists())
+
+    def test_delete_removes_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "gone.py").write_text("bye")
+            chatgpt._execute_action({"op": "delete", "path": "gone.py"}, repo, True)
+            self.assertFalse((repo / "gone.py").exists())
+
+    def test_traversal_write_is_reported_not_executed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            out = chatgpt._execute_action(
+                {"op": "write", "path": "../escape.py", "content": "pwn"}, repo, True
+            )
+            self.assertIn("error", out)
+            self.assertFalse((Path(directory) / "escape.py").exists())
+
+    def test_unknown_op_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = chatgpt._execute_action({"op": "nope"}, Path(directory), True)
+            self.assertIn("unknown op", out)
+
+
+class AgentLoopTests(unittest.TestCase):
+    def test_loop_inspects_then_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "foo.py").write_text("print('hi')\n")
+            replies = iter([
+                "Looking.\n" + _actions_block([{"op": "read", "path": "foo.py"}]),
+                "Done reviewing.\nVERDICT: APPROVE",
+            ])
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: next(replies)):
+                result = chatgpt.run_chatgpt_agent("review", repo, allow_writes=False)
+            self.assertEqual(result, "Done reviewing.\nVERDICT: APPROVE")
+
+    def test_loop_writes_a_file_then_summarizes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            replies = iter([
+                "Implementing.\n" + _actions_block(
+                    [{"op": "write", "path": "feature.py", "content": "VALUE = 42\n"}]
+                ),
+                "Added feature.py with VALUE.",
+            ])
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: next(replies)):
+                result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
+            self.assertEqual((repo / "feature.py").read_text(), "VALUE = 42\n")
+            self.assertIn("feature.py", result)
+
+    def test_loop_stops_at_max_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            # Always asks for another action — never finishes on its own.
+            never_done = "working\n" + _actions_block([{"op": "list", "path": "."}])
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: never_done):
+                result = chatgpt.run_chatgpt_agent(
+                    "loop", repo, allow_writes=False, max_rounds=3
+                )
+            self.assertIsInstance(result, str)
+
+    def test_observations_are_fed_back_into_the_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "readme.txt").write_text("SENTINEL")
+            seen = []
+
+            replies = iter([
+                "look\n" + _actions_block([{"op": "read", "path": "readme.txt"}]),
+                "done",
+            ])
+
+            def fake(prompt, model=None):
+                seen.append(prompt)
+                return next(replies)
+
+            with patch("pr_pilot.chatgpt.run_chatgpt", fake):
+                chatgpt.run_chatgpt_agent("task", repo, allow_writes=False)
+            # The second prompt must carry the file contents observed in round 1.
+            self.assertIn("SENTINEL", seen[1])
+
+
 if __name__ == "__main__":
     unittest.main()
