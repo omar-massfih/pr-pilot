@@ -167,11 +167,22 @@ export TELEGRAM_BOT_TOKEN="..."
 pr-pilot telegram
 ```
 
-Send:
+Build a specific feature:
 
 ```text
 /feature Add CSV export to the invoices page
 ```
+
+Or run the interactive auto loop — the bot recommends a feature and waits for your go-ahead before
+touching the repo:
+
+```text
+/auto    → 💡 Suggested feature: …   (/yes to build · /no for another · /stop to end)
+/yes     → builds it, opens a draft PR, then suggests the next feature
+```
+
+`/no` swaps in a different suggestion; `/stop` ends the loop. This is the autonomous `auto` flow with
+a human gate on every change.
 
 The Telegram MVP processes one request at a time. For production, run the workflow jobs in isolated
 containers or per-run Git worktrees and put intake onto a durable queue.
