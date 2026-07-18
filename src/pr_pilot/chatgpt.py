@@ -161,6 +161,18 @@ def _refresh(auth: dict, path: Path) -> dict:
     return auth
 
 
+def check_auth() -> Path:
+    """Validate that usable ChatGPT tokens exist on disk; return their path.
+
+    A cheap, offline health check for ``pr-pilot doctor``: it confirms the
+    auth file exists and holds ChatGPT tokens, without refreshing or calling
+    the network. Raises :class:`AgentShipError` with the fix (``codex login``).
+    """
+    path = _auth_path()
+    _load_auth(path)
+    return path
+
+
 def access_token(force_refresh: bool = False) -> tuple[str, str]:
     """A valid ``(access_token, account_id)`` pair, refreshed when near expiry."""
     path = _auth_path()

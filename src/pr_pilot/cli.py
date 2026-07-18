@@ -158,12 +158,24 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def doctor(config) -> int:
-    required = ["git", "gh", "codex" if config.implementer.name == "codex" else "cursor-agent"]
-    reviewer = "codex" if config.reviewer.name == "codex" else "cursor-agent"
-    required.append(reviewer)
+    # chatgpt is not a binary — it is checked via its auth file below.
+    binaries = {"codex": "codex", "cursor": "cursor-agent"}
+    required = ["git", "gh"]
+    for provider in (config.implementer, config.reviewer):
+        binary = binaries.get(provider.name)
+        if binary:
+            required.append(binary)
     missing = sorted({command for command in required if shutil.which(command) is None})
     if missing:
         raise AgentShipError("Missing commands: " + ", ".join(missing))
+    if "chatgpt" in {
+        config.implementer.name,
+        config.reviewer.name,
+        config.memory.profile_provider,
+    }:
+        from .chatgpt import check_auth
+
+        check_auth()
     if config.memory.enabled:
         try:
             import fastembed  # noqa: F401
