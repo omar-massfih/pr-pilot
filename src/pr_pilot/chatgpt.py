@@ -349,8 +349,9 @@ _MAX_ROUNDS = 40
 # Wall-clock budget for one agent-loop invocation (planning, implementing, or a
 # single review). The transcript is resent every round to a slow reasoning
 # model, so a phase can otherwise grind for a very long time; past this it stops
-# and the caller's failure path recovers.
-_MAX_AGENT_SECONDS = 1200.0
+# and the caller's failure path recovers. Set generously: on a large repo the
+# implement phase alone can run 20-30 min of visible round-by-round progress.
+_MAX_AGENT_SECONDS = 2700.0
 # How many times to push an implementer that "finished" without editing files.
 _MAX_WRITE_NUDGES = 2
 _MAX_READ_BYTES = 12_000
