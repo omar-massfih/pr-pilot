@@ -351,6 +351,8 @@ _MAX_ROUNDS = 40
 # model, so a phase can otherwise grind for a very long time; past this it stops
 # and the caller's failure path recovers.
 _MAX_AGENT_SECONDS = 1200.0
+# How many times to push an implementer that "finished" without editing files.
+_MAX_WRITE_NUDGES = 2
 _MAX_READ_BYTES = 12_000
 _MAX_OP_OUTPUT = 8_000
 _MAX_LIST_ENTRIES = 200
@@ -535,6 +537,8 @@ def run_chatgpt_agent(
     protocol = _WRITE_PROTOCOL if allow_writes else _READ_PROTOCOL
     transcript = f"{protocol}\n\n--- TASK ---\n{prompt}"
     last_prose = ""
+    wrote = False  # did any write/delete actually land?
+    nudges = 0
     started = time.monotonic()
     logger.info("agent loop start: role=%s max_rounds=%d budget=%.0fs", role, max_rounds, max_seconds)
     for round_num in range(1, max_rounds + 1):
@@ -547,8 +551,30 @@ def run_chatgpt_agent(
         reply = run_chatgpt(transcript, model=model)
         prose, actions = _parse_actions(reply)
         last_prose = prose or last_prose
-        if actions is None:  # no fenced block — the model is done
-            logger.info("agent loop done: role=%s rounds=%d elapsed=%.0fs", role, round_num, elapsed)
+        if actions is None:  # no fenced block — the model thinks it is done
+            # An implementer that "finished" without editing anything has done
+            # nothing (the run would fail on an empty worktree). Push back a
+            # couple of times before accepting it, unless it explicitly says no
+            # change is needed.
+            if allow_writes and not wrote and nudges < _MAX_WRITE_NUDGES \
+                    and prose.strip().upper() != "NO_CHANGE":
+                nudges += 1
+                logger.info("implementer finished without writing; nudge %d/%d", nudges, _MAX_WRITE_NUDGES)
+                transcript = _clip(
+                    transcript
+                    + f"\n\n--- ASSISTANT ---\n{reply}"
+                    + "\n\n--- OBSERVATION ---\n"
+                    + "You have not created or edited any files, so nothing is "
+                    "implemented yet. Emit write actions to make the change now. "
+                    "Only if no code change is genuinely required, reply with "
+                    "exactly NO_CHANGE.",
+                    _MAX_TRANSCRIPT_CHARS,
+                )
+                continue
+            logger.info(
+                "agent loop done: role=%s rounds=%d elapsed=%.0fs wrote=%s",
+                role, round_num, elapsed, wrote,
+            )
             return prose
         ops = ", ".join(
             f"{a.get('op')} {a.get('path') or ''}".strip() for a in actions
@@ -567,6 +593,8 @@ def run_chatgpt_agent(
         observations = []
         for action in actions:
             result = _execute_action(action, repo, allow_writes)
+            if action.get("op") in _WRITE_OPS and not result.startswith("error"):
+                wrote = True
             label = action.get("path") or action.get("op")
             observations.append(f"[{action.get('op')} {label}]\n{result}")
         transcript = _clip(

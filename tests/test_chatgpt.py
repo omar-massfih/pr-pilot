@@ -388,6 +388,42 @@ class AgentLoopTests(unittest.TestCase):
                 )
             self.assertIsInstance(result, str)
 
+    def test_implementer_is_nudged_to_write_when_it_finishes_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            replies = iter([
+                "I reviewed it and here's what I'd change.",  # done, but wrote nothing
+                "Now doing it.\n" + _actions_block(
+                    [{"op": "write", "path": "f.py", "content": "x = 1\n"}]
+                ),
+                "Done, added f.py.",
+            ])
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: next(replies)):
+                result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
+            self.assertEqual((repo / "f.py").read_text(), "x = 1\n")
+            self.assertIn("f.py", result)
+
+    def test_implementer_may_declare_no_change_without_nudging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: "NO_CHANGE"):
+                result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
+            self.assertEqual(result, "NO_CHANGE")
+
+    def test_read_role_is_not_nudged_to_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            calls = {"n": 0}
+
+            def once(prompt, model=None):
+                calls["n"] += 1
+                return "Here is my review.\nVERDICT: APPROVE"
+
+            with patch("pr_pilot.chatgpt.run_chatgpt", once):
+                result = chatgpt.run_chatgpt_agent("review", repo, allow_writes=False)
+            self.assertEqual(calls["n"], 1)  # accepted immediately, no nagging
+            self.assertIn("VERDICT", result)
+
     def test_loop_stops_when_the_time_budget_is_exceeded(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
