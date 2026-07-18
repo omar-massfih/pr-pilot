@@ -136,10 +136,14 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         ),
         state_dir=Path(data.get("state_dir", "~/.pr-pilot")).expanduser(),
     )
+    # chatgpt is text-only (no file edits), so it can review but not implement.
     if config.implementer.name not in {"codex", "cursor"}:
-        raise AgentShipError("implementer.name must be 'codex' or 'cursor'")
-    if config.reviewer.name not in {"codex", "cursor"}:
-        raise AgentShipError("reviewer.name must be 'codex' or 'cursor'")
+        raise AgentShipError(
+            "implementer.name must be 'codex' or 'cursor' "
+            "(chatgpt cannot edit files)"
+        )
+    if config.reviewer.name not in {"codex", "cursor", "chatgpt"}:
+        raise AgentShipError("reviewer.name must be 'codex', 'cursor', or 'chatgpt'")
     if config.workflow.max_review_attempts < 0:
         raise AgentShipError("workflow.max_review_attempts cannot be negative")
     for provider in (config.implementer, config.reviewer):
@@ -147,9 +151,12 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
             raise AgentShipError(
                 "provider limit_poll_seconds must be positive and limit_max_wait_seconds cannot be negative"
             )
-    if config.memory.profile_provider not in {"implementer", "reviewer", "codex", "cursor"}:
+    if config.memory.profile_provider not in {
+        "implementer", "reviewer", "codex", "cursor", "chatgpt",
+    }:
         raise AgentShipError(
-            "memory.profile_provider must be implementer, reviewer, codex, or cursor"
+            "memory.profile_provider must be implementer, reviewer, codex, "
+            "cursor, or chatgpt"
         )
     if config.memory.chunk_overlap >= config.memory.chunk_chars:
         raise AgentShipError("memory.chunk_overlap must be smaller than memory.chunk_chars")

@@ -9,7 +9,14 @@ from unittest.mock import patch
 from pr_pilot.commands import Result
 from pr_pilot.config import ProviderConfig
 from pr_pilot.errors import AgentShipError
-from pr_pilot.providers import AgentProvider, CodexProvider, CursorProvider, LimitRetryProvider
+from pr_pilot.providers import (
+    AgentProvider,
+    ChatGptProvider,
+    CodexProvider,
+    CursorProvider,
+    LimitRetryProvider,
+    make_provider,
+)
 
 
 class SequenceProvider(AgentProvider):
@@ -47,6 +54,26 @@ class ProviderTests(unittest.TestCase):
             self.assertNotIn("--force", mocked.call_args.args[0])
             provider.invoke("fix", repo=Path(directory), write=True)
             self.assertIn("--force", mocked.call_args.args[0])
+
+    def test_chatgpt_delegates_reads_to_the_backend(self):
+        with patch(
+            "pr_pilot.providers.run_chatgpt", return_value="looks good"
+        ) as mocked:
+            output = ChatGptProvider(ProviderConfig("chatgpt", model="gpt-5.5")).invoke(
+                "review this", repo=Path("."), write=False
+            )
+        self.assertEqual(output, "looks good")
+        mocked.assert_called_once_with("review this", model="gpt-5.5")
+
+    def test_chatgpt_refuses_writing_roles(self):
+        provider = ChatGptProvider(ProviderConfig("chatgpt"))
+        with self.assertRaisesRegex(AgentShipError, "text-only"):
+            provider.invoke("fix it", repo=Path("."), write=True)
+
+    def test_make_provider_wires_chatgpt(self):
+        provider = make_provider(ProviderConfig("chatgpt"))
+        self.assertIsInstance(provider, LimitRetryProvider)
+        self.assertIsInstance(provider.provider, ChatGptProvider)
 
     def test_limit_errors_poll_until_provider_continues(self):
         inner = SequenceProvider(

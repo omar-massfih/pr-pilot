@@ -9,7 +9,11 @@ limit_poll_seconds = 60
 limit_max_wait_seconds = 0 # 0 waits indefinitely; Ctrl-C still stops immediately.
 
 [reviewer]
-name = "cursor" # A different provider is optional, but gives stronger independence.
+# "codex", "cursor", or "chatgpt". A different provider than the implementer is
+# optional, but gives stronger independence. "chatgpt" talks to chatgpt.com's
+# backend directly using the OAuth tokens from `codex login` (text-only, so it
+# can review but not implement; model must be a codex-supported id, default gpt-5.5).
+name = "cursor"
 # model = "optional-model-name"
 limit_poll_seconds = 60
 limit_max_wait_seconds = 0

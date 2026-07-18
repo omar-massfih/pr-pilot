@@ -6,6 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from .chatgpt import run_chatgpt
 from .commands import run
 from .config import ProviderConfig
 from .errors import AgentShipError
@@ -59,6 +60,26 @@ class CursorProvider(AgentProvider):
             raise AgentShipError("Cursor returned an unexpected response") from exc
 
 
+class ChatGptProvider(AgentProvider):
+    """chatgpt.com's backend over HTTP, reusing the Codex CLI's OAuth tokens.
+
+    Text-only: it returns a reply but cannot edit files, so it only serves
+    read-only roles (reviewer, memory profiling) — config validation rejects
+    it as implementer, and ``write=True`` is refused here as a second guard.
+    """
+
+    def __init__(self, config: ProviderConfig):
+        self.config = config
+
+    def invoke(self, prompt: str, *, repo: Path, write: bool) -> str:
+        if write:
+            raise AgentShipError(
+                "The chatgpt provider is text-only and cannot edit files; "
+                "use codex or cursor for writing roles."
+            )
+        return run_chatgpt(prompt, model=self.config.model)
+
+
 class LimitRetryProvider(AgentProvider):
     def __init__(
         self,
@@ -108,6 +129,8 @@ def make_provider(config: ProviderConfig) -> AgentProvider:
         provider = CodexProvider(config)
     elif config.name == "cursor":
         provider = CursorProvider(config)
+    elif config.name == "chatgpt":
+        provider = ChatGptProvider(config)
     else:
         raise AgentShipError(f"Unknown provider: {config.name}")
     return LimitRetryProvider(provider, config)
