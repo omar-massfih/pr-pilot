@@ -66,6 +66,10 @@ class Config:
     repo: Path
     implementer: ProviderConfig = field(default_factory=ProviderConfig)
     reviewer: ProviderConfig = field(default_factory=ProviderConfig)
+    # Proposes the next feature in the /auto loop. Defaults to the implementer's
+    # config when no [designer] table is given, so ideation runs at the same
+    # model/effort without extra setup; override it to design on a different one.
+    designer: ProviderConfig = field(default_factory=ProviderConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     babysit: BabysitConfig = field(default_factory=BabysitConfig)
@@ -106,6 +110,8 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         repo=configured_repo.resolve(),
         implementer=_provider(data.get("implementer", {})),
         reviewer=_provider(data.get("reviewer", {})),
+        # Inherit the implementer's table when [designer] is absent.
+        designer=_provider(data.get("designer", data.get("implementer", {}))),
         github=GitHubConfig(
             base_branch=str(gh.get("base_branch", "main")),
             draft=bool(gh.get("draft", True)),
@@ -144,9 +150,11 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         raise AgentShipError("implementer.name must be 'codex', 'cursor', or 'chatgpt'")
     if config.reviewer.name not in {"codex", "cursor", "chatgpt"}:
         raise AgentShipError("reviewer.name must be 'codex', 'cursor', or 'chatgpt'")
+    if config.designer.name not in {"codex", "cursor", "chatgpt"}:
+        raise AgentShipError("designer.name must be 'codex', 'cursor', or 'chatgpt'")
     if config.workflow.max_review_attempts < 0:
         raise AgentShipError("workflow.max_review_attempts cannot be negative")
-    for provider in (config.implementer, config.reviewer):
+    for provider in (config.implementer, config.reviewer, config.designer):
         if provider.limit_poll_seconds <= 0 or provider.limit_max_wait_seconds < 0:
             raise AgentShipError(
                 "provider limit_poll_seconds must be positive and limit_max_wait_seconds cannot be negative"

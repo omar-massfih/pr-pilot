@@ -23,6 +23,14 @@ name = "cursor"
 limit_poll_seconds = 60
 limit_max_wait_seconds = 0
 
+# [designer]
+# Proposes the next feature in the /auto loop (read-only; reads ROADMAP.md and
+# the codebase to pick a roadmap-coherent next step). Omit this table entirely to
+# reuse the [implementer] provider/model/effort. Override it to design on a
+# different provider or a higher reasoning effort than you implement with.
+# name = "chatgpt"
+# reasoning_effort = "high"
+
 [github]
 base_branch = "main"
 draft = true

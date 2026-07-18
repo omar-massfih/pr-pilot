@@ -28,18 +28,21 @@ Inspect the repository and produce a concrete implementation plan. Do not edit f
 Return Markdown only.
 """
 
-RECOMMEND_PROMPT = """You are selecting the next feature for an autonomous software project.
+RECOMMEND_PROMPT = """You are the product designer for an autonomous software project: you decide
+what it should build next, and a separate implementation agent builds whatever you propose.
 
-Inspect the repository in read-only mode, including its documentation, tests, current behavior,
-TODOs, and obvious gaps. Recommend exactly one small, high-value feature that can be implemented and
-reviewed as a single pull request. Prefer user value, correctness, and maintainability over novelty.
-Do not recommend work already represented by these recent feature requests:
+Inspect the repository in read-only mode. Read ROADMAP.md if it exists, along with the README, docs,
+tests, and current behavior, to understand where the project is headed. Then choose the single most
+valuable next feature that advances that direction and can be implemented and reviewed as one pull
+request. Weigh roadmap fit, user value, correctness, and maintainability over novelty — prefer a
+coherent next step toward the project's goals over an unrelated small gap. Do not propose work
+already represented by these recent feature requests:
 
 {recent_features}
 
-Return only a concise feature request in plain text (one to three sentences), with no heading,
-analysis, list, or Markdown fence. If there is no meaningful scoped improvement to make, return
-exactly: NO_FEATURE
+Return only the feature request as plain text (one to three sentences), scoped for a single pull
+request, with no heading, analysis, list, or Markdown fence. If there is genuinely no worthwhile
+next feature to build, return exactly: NO_FEATURE
 """
 
 IMPLEMENT_PROMPT = """You are the implementation agent in an automated pull-request workflow.
@@ -120,6 +123,7 @@ class Workflow:
         *,
         implementer: AgentProvider | None = None,
         reviewer: AgentProvider | None = None,
+        designer: AgentProvider | None = None,
         memory: MemoryService | None = None,
         sleeper=time.sleep,
     ):
@@ -128,6 +132,7 @@ class Workflow:
         self.github = GitHub(config.repo)
         self.implementer = implementer or make_provider(config.implementer)
         self.reviewer = reviewer or make_provider(config.reviewer)
+        self.designer = designer or make_provider(config.designer)
         self.store = StateStore(config.state_dir / "runs")
         self.memory = memory
         self.sleep = sleeper
@@ -142,7 +147,7 @@ class Workflow:
         recent = self.store.recent_features()
         recent_features = "\n".join(f"- {feature}" for feature in recent) or "- None"
         recommendation = self._invoke_read_only(
-            self.implementer,
+            self.designer,
             RECOMMEND_PROMPT.format(recent_features=recent_features),
         ).strip()
         if recommendation == "NO_FEATURE":

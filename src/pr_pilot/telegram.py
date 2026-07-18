@@ -18,6 +18,8 @@ HELP = (
     "/auto — suggest the next feature and wait for your go-ahead\n"
     "/yes — build the suggested feature, then suggest the next one\n"
     "/no — skip it and suggest a different feature\n"
+    "/edit <description> — revise the suggestion before building "
+    "(or just send the revised text)\n"
     "/stop — end the auto loop\n"
     "/feature <description> — build a specific feature now"
 )
@@ -122,6 +124,12 @@ class TelegramBot:
             else:
                 self.pending = None
                 self._build(chat_id, feature)
+        elif command == "/edit":
+            self._edit(chat_id, text.removeprefix("/edit").strip())
+        elif self.pending and text and not text.startswith("/"):
+            # A plain-text reply while a suggestion is on the table is a revision
+            # of it, not an unknown command — treat it as /edit.
+            self._edit(chat_id, text)
         else:
             self.send(chat_id, HELP)
 
@@ -189,6 +197,31 @@ class TelegramBot:
             return
         self.pending = None
         self._suggest(chat_id)
+
+    def _edit(self, chat_id: int, feature: str) -> None:
+        """Replace the pending suggestion with the user's revision.
+
+        Editing only revises what is on the table and echoes it back for
+        confirmation — it does not build. ``/yes`` remains the single build
+        trigger, so an edited feature is still gated by an explicit approval.
+        """
+        if not self.pending:
+            self.send(
+                chat_id,
+                "Nothing to edit yet. Send /auto for a suggestion, or "
+                "/feature <description> to build one directly.",
+            )
+            return
+        if not feature:
+            self.send(chat_id, "Expected: /edit <revised feature>")
+            return
+        self.pending = feature
+        logger.info("edited suggested feature: %s", feature)
+        self.send(
+            chat_id,
+            f"✏️ Updated suggestion:\n\n{feature}\n\n"
+            "/yes to build it · /no for a different one · /stop to end.",
+        )
 
     def _build(self, chat_id: int, feature: str) -> None:
         self.send(chat_id, "Accepted. Planning, implementation, and CI babysitting have started — this can take a while.")

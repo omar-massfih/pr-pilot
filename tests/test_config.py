@@ -41,6 +41,50 @@ allowed_chat_ids = [42]
             self.assertEqual(config.telegram.allowed_chat_ids, (42,))
             self.assertEqual(config.memory.embedding_model, "BAAI/bge-small-en-v1.5")
 
+    def test_designer_inherits_implementer_when_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'''repo = "{root}"
+[implementer]
+name = "chatgpt"
+reasoning_effort = "high"
+'''
+            )
+            config = load_config(config_file)
+            # No [designer] table => it mirrors the implementer's provider config.
+            self.assertEqual(config.designer.name, "chatgpt")
+            self.assertEqual(config.designer.reasoning_effort, "high")
+
+    def test_designer_can_override_the_implementer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'''repo = "{root}"
+[implementer]
+name = "chatgpt"
+[designer]
+name = "codex"
+reasoning_effort = "medium"
+'''
+            )
+            config = load_config(config_file)
+            self.assertEqual(config.designer.name, "codex")
+            self.assertEqual(config.designer.reasoning_effort, "medium")
+            self.assertEqual(config.implementer.name, "chatgpt")
+
+    def test_rejects_unknown_designer_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'repo = "{root}"\n[designer]\nname = "other"\n'
+            )
+            with self.assertRaises(AgentShipError):
+                load_config(config_file)
+
     def test_rejects_unknown_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

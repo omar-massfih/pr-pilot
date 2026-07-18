@@ -103,8 +103,13 @@ class WorkflowTests(unittest.TestCase):
                 memory=MemoryConfig(enabled=False),
                 state_dir=root / "state",
             )
-            implementer = FakeProvider(["Add a dry-run mode for publishing changes."])
-            workflow = Workflow(config, implementer=implementer, reviewer=FakeProvider([]))
+            designer = FakeProvider(["Add a dry-run mode for publishing changes."])
+            workflow = Workflow(
+                config,
+                implementer=FakeProvider([]),
+                reviewer=FakeProvider([]),
+                designer=designer,
+            )
             repo = FakeRepo()
             workflow.repo = repo
             workflow.store.save(RunState("previous", "Add JSON output", str(root)))
@@ -113,8 +118,10 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(feature, "Add a dry-run mode for publishing changes.")
             self.assertEqual(repo.checked_out_bases, ["main"])
-            self.assertEqual(implementer.calls[0][1], False)
-            self.assertIn("Add JSON output", implementer.calls[0][0])
+            # Recommendation runs read-only through the designer, and past runs
+            # are fed in so it doesn't repeat them.
+            self.assertEqual(designer.calls[0][1], False)
+            self.assertIn("Add JSON output", designer.calls[0][0])
 
     def test_recommendation_can_stop_the_autonomous_loop(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,8 +133,9 @@ class WorkflowTests(unittest.TestCase):
             )
             workflow = Workflow(
                 config,
-                implementer=FakeProvider(["NO_FEATURE"]),
+                implementer=FakeProvider([]),
                 reviewer=FakeProvider([]),
+                designer=FakeProvider(["NO_FEATURE"]),
             )
             workflow.repo = FakeRepo()
 

@@ -97,6 +97,40 @@ class TelegramLoopTests(unittest.TestCase):
         self.assertEqual(bot.pending, "Beta")
         self.assertEqual(workflow.runs, [])  # nothing built on a skip
 
+    def test_edit_revises_pending_without_building(self):
+        bot, workflow = self._bot(["Add a --json flag"])
+        bot._handle(_msg("/auto"))
+        bot._handle(_msg("/edit Add a --json flag that also pretty-prints"))
+        # The revision replaces the pending suggestion but builds nothing yet.
+        self.assertEqual(bot.pending, "Add a --json flag that also pretty-prints")
+        self.assertEqual(workflow.runs, [])
+        self.assertTrue(any("Updated suggestion" in text for text in self.sent))
+        # A following /yes builds the edited version, not the original.
+        bot._handle(_msg("/yes"))
+        self.assertEqual(
+            workflow.runs, [("Add a --json flag that also pretty-prints", True)]
+        )
+
+    def test_plain_text_reply_edits_pending(self):
+        bot, workflow = self._bot(["Alpha"])
+        bot._handle(_msg("/auto"))
+        bot._handle(_msg("Alpha, but scoped to just the CLI"))
+        self.assertEqual(bot.pending, "Alpha, but scoped to just the CLI")
+        self.assertEqual(workflow.runs, [])
+
+    def test_edit_without_pending_is_a_no_op(self):
+        bot, workflow = self._bot([])
+        bot._handle(_msg("/edit do the thing"))
+        self.assertEqual(workflow.runs, [])
+        self.assertIsNone(bot.pending)
+        self.assertTrue(any("Nothing to edit" in text for text in self.sent))
+
+    def test_plain_text_without_pending_shows_help(self):
+        bot, workflow = self._bot([])
+        bot._handle(_msg("just some chatter"))
+        self.assertEqual(workflow.runs, [])
+        self.assertTrue(any("PR Pilot commands" in text for text in self.sent))
+
     def test_stop_clears_pending(self):
         bot, _ = self._bot(["Alpha"])
         bot._handle(_msg("/auto"))
