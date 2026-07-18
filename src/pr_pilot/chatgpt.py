@@ -351,13 +351,16 @@ _MAX_ROUNDS = 40
 # model, so a phase can otherwise grind for a very long time; past this it stops
 # and the caller's failure path recovers. Set generously: on a large repo the
 # implement phase alone can run 20-30 min of visible round-by-round progress.
-_MAX_AGENT_SECONDS = 2700.0
+_MAX_AGENT_SECONDS = 7200.0
 # How many times to push an implementer that "finished" without editing files.
 _MAX_WRITE_NUDGES = 2
 _MAX_READ_BYTES = 12_000
 _MAX_OP_OUTPUT = 8_000
 _MAX_LIST_ENTRIES = 200
 _MAX_TRANSCRIPT_CHARS = 120_000
+# Tracked files shown to the model up front so it can target files directly
+# instead of spending rounds discovering the repo layout.
+_MAX_TREE_FILES = 400
 
 _READ_PROTOCOL = """\
 You are working inside a git repository. You cannot see it until you ask.
@@ -387,6 +390,20 @@ Make the smallest coherent change, update or add tests, and inspect before you
 edit. Each result comes back as an "Observation". When every intended change is
 written to disk, answer in plain text with NO actions block, summarizing what you
 changed — that plain answer ends the run."""
+
+
+def _repo_tree(repo: Path, limit: int = _MAX_TREE_FILES) -> str:
+    """A capped list of tracked files, to seed the model with the repo layout."""
+    proc = subprocess.run(
+        ["git", "ls-files"], cwd=repo, text=True, capture_output=True
+    )
+    if proc.returncode != 0:
+        return ""
+    files = proc.stdout.splitlines()
+    tree = "\n".join(files[:limit])
+    if len(files) > limit:
+        tree += f"\n… ({len(files) - limit} more files — use list/search to see them)"
+    return tree
 
 
 def _parse_actions(text: str) -> tuple[str, list[dict] | None]:
@@ -536,7 +553,9 @@ def run_chatgpt_agent(
     repo = Path(repo)
     role = "write" if allow_writes else "read"
     protocol = _WRITE_PROTOCOL if allow_writes else _READ_PROTOCOL
-    transcript = f"{protocol}\n\n--- TASK ---\n{prompt}"
+    tree = _repo_tree(repo)
+    layout = f"\n\n--- REPOSITORY FILES ---\n{tree}" if tree else ""
+    transcript = f"{protocol}{layout}\n\n--- TASK ---\n{prompt}"
     last_prose = ""
     wrote = False  # did any write/delete actually land?
     nudges = 0

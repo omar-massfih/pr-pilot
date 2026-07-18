@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
@@ -423,6 +424,30 @@ class AgentLoopTests(unittest.TestCase):
                 result = chatgpt.run_chatgpt_agent("review", repo, allow_writes=False)
             self.assertEqual(calls["n"], 1)  # accepted immediately, no nagging
             self.assertIn("VERDICT", result)
+
+    def test_first_prompt_seeds_the_repo_file_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            for args in (["init"], ["config", "user.email", "t@t.co"],
+                         ["config", "user.name", "t"]):
+                subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+            (repo / "alpha.py").write_text("x = 1\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "i"], cwd=repo, check=True, capture_output=True)
+            seen = []
+
+            def fake(prompt, model=None):
+                seen.append(prompt)
+                return "done"
+
+            with patch("pr_pilot.chatgpt.run_chatgpt", fake):
+                chatgpt.run_chatgpt_agent("task", repo, allow_writes=False)
+            self.assertIn("REPOSITORY FILES", seen[0])
+            self.assertIn("alpha.py", seen[0])
+
+    def test_repo_tree_empty_outside_a_git_repo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(chatgpt._repo_tree(Path(directory)), "")
 
     def test_loop_stops_when_the_time_budget_is_exceeded(self):
         with tempfile.TemporaryDirectory() as directory:
