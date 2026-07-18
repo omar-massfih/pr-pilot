@@ -52,17 +52,39 @@ class TelegramBot:
         self._transport = transport
         self._workflow: Workflow | None = None
         self.pending: str | None = None
-        self.offset = 0
+        # Resume from the last confirmed update so a restart neither reprocesses
+        # old commands (a re-run /feature could rebuild) nor drops new ones.
+        self.offset = self._load_offset()
+
+    @property
+    def _offset_path(self):
+        return self.config.state_dir / "telegram_offset"
+
+    def _load_offset(self) -> int:
+        try:
+            return int(self._offset_path.read_text().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def _save_offset(self) -> None:
+        try:
+            self.config.state_dir.mkdir(parents=True, exist_ok=True)
+            self._offset_path.write_text(str(self.offset))
+        except OSError:
+            logger.warning("could not persist telegram offset", exc_info=True)
 
     def serve_forever(self) -> None:
         logger.info(
-            "telegram bot polling; repo=%s allowed_chats=%d",
-            self.config.repo, len(self.allowed),
+            "telegram bot polling; repo=%s allowed_chats=%d offset=%d",
+            self.config.repo, len(self.allowed), self.offset,
         )
         while True:
             updates = self._call("getUpdates", {"timeout": 30, "offset": self.offset})["result"]
             for update in updates:
                 self.offset = max(self.offset, int(update["update_id"]) + 1)
+                # Persist before handling so a message that crashes the handler
+                # is skipped on restart instead of wedging in a crash loop.
+                self._save_offset()
                 self._handle(update)
 
     def _workflow_instance(self) -> Workflow:

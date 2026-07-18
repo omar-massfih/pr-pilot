@@ -163,5 +163,36 @@ class TelegramLoopTests(unittest.TestCase):
         self.assertTrue(any("Could not suggest" in text for text in self.sent))
 
 
+class OffsetPersistenceTests(unittest.TestCase):
+    def _make_bot(self, state_dir):
+        config = Config(
+            repo=state_dir,
+            state_dir=state_dir,
+            telegram=TelegramConfig(allowed_chat_ids=(CHAT,)),
+        )
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "tok"}):
+            return TelegramBot(
+                config, lambda: FakeWorkflow([]),
+                transport=lambda method, values: {"ok": True, "result": {}},
+            )
+
+    def test_offset_defaults_to_zero_without_a_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(self._make_bot(Path(directory)).offset, 0)
+
+    def test_offset_persists_across_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._make_bot(Path(directory))
+            bot.offset = 4242
+            bot._save_offset()
+            # A fresh instance stands in for a restart: it must resume, not reset.
+            self.assertEqual(self._make_bot(Path(directory)).offset, 4242)
+
+    def test_corrupt_offset_file_falls_back_to_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "telegram_offset").write_text("not a number")
+            self.assertEqual(self._make_bot(Path(directory)).offset, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
