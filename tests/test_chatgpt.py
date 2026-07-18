@@ -388,6 +388,17 @@ class AgentLoopTests(unittest.TestCase):
                 )
             self.assertIsInstance(result, str)
 
+    def test_loop_stops_when_the_time_budget_is_exceeded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            forever = "working\n" + _actions_block([{"op": "list", "path": "."}])
+            with patch("pr_pilot.chatgpt.run_chatgpt", lambda prompt, model=None: forever):
+                with self.assertRaisesRegex(AgentShipError, "budget"):
+                    # Zero budget: the deadline check trips before any round runs.
+                    chatgpt.run_chatgpt_agent(
+                        "task", repo, allow_writes=True, max_seconds=0
+                    )
+
     def test_observations_are_fed_back_into_the_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

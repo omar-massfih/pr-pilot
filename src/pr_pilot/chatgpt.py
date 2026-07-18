@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import os
 import re
 import subprocess
@@ -38,6 +39,8 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from .errors import AgentShipError
+
+logger = logging.getLogger(__name__)
 
 _TOKEN_URL = "https://auth.openai.com/oauth/token"
 # The Codex CLI's public OAuth client id (baked into the open-source CLI).
@@ -343,6 +346,11 @@ _WRITE_OPS = ("write", "delete")
 
 # Bounds keep a single run — and the resent transcript — from exploding.
 _MAX_ROUNDS = 40
+# Wall-clock budget for one agent-loop invocation (planning, implementing, or a
+# single review). The transcript is resent every round to a slow reasoning
+# model, so a phase can otherwise grind for a very long time; past this it stops
+# and the caller's failure path recovers.
+_MAX_AGENT_SECONDS = 1200.0
 _MAX_READ_BYTES = 12_000
 _MAX_OP_OUTPUT = 8_000
 _MAX_LIST_ENTRIES = 200
@@ -510,6 +518,7 @@ def run_chatgpt_agent(
     allow_writes: bool,
     model: str | None = None,
     max_rounds: int = _MAX_ROUNDS,
+    max_seconds: float = _MAX_AGENT_SECONDS,
 ) -> str:
     """Drive the model through inspect/edit rounds; return its final answer.
 
@@ -517,18 +526,34 @@ def run_chatgpt_agent(
     transcript is resent each round (bounded by ``_MAX_TRANSCRIPT_CHARS``). The
     loop ends when the model replies without an actions block, or when
     ``max_rounds`` is hit — for a writing role the caller then checks the working
-    tree, so a truncated run still leaves real edits behind.
+    tree, so a truncated run still leaves real edits behind. A per-invocation
+    wall-clock budget (``max_seconds``) stops a runaway phase; every round is
+    logged at INFO so progress is visible in the service journal.
     """
     repo = Path(repo)
+    role = "write" if allow_writes else "read"
     protocol = _WRITE_PROTOCOL if allow_writes else _READ_PROTOCOL
     transcript = f"{protocol}\n\n--- TASK ---\n{prompt}"
     last_prose = ""
-    for _ in range(max_rounds):
+    started = time.monotonic()
+    logger.info("agent loop start: role=%s max_rounds=%d budget=%.0fs", role, max_rounds, max_seconds)
+    for round_num in range(1, max_rounds + 1):
+        elapsed = time.monotonic() - started
+        if elapsed > max_seconds:
+            raise AgentShipError(
+                f"agent loop ({role}) exceeded its {max_seconds:.0f}s budget "
+                f"after {round_num - 1} rounds"
+            )
         reply = run_chatgpt(transcript, model=model)
         prose, actions = _parse_actions(reply)
         last_prose = prose or last_prose
         if actions is None:  # no fenced block — the model is done
+            logger.info("agent loop done: role=%s rounds=%d elapsed=%.0fs", role, round_num, elapsed)
             return prose
+        ops = ", ".join(
+            f"{a.get('op')} {a.get('path') or ''}".strip() for a in actions
+        ) if actions else "(empty block)"
+        logger.info("agent round %d/%d (%s): %s", round_num, max_rounds, role, ops[:300])
         if not actions:
             transcript = _clip(
                 transcript
@@ -551,4 +576,5 @@ def run_chatgpt_agent(
             + "\n\n".join(observations),
             _MAX_TRANSCRIPT_CHARS,
         )
+    logger.info("agent loop hit max_rounds=%d (role=%s)", max_rounds, role)
     return last_prose or "Reached the maximum number of agent rounds."
