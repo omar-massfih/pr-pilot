@@ -101,6 +101,8 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("plan", command)
         self.assertNotIn("--auto", command)
         self.assertIn("chatgpt-proxy/gpt-5.5", command)  # default model slug
+        # The target dir is pinned explicitly (opencode reads $PWD, not cwd).
+        self.assertEqual(command[command.index("--dir") + 1], directory)
 
     def test_opencode_write_role_uses_auto_not_plan_agent(self):
         stream = json.dumps({"type": "text", "part": {"id": "p1", "text": "done"}})

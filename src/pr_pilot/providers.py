@@ -146,6 +146,10 @@ class OpencodeProvider(AgentProvider):
     def invoke(self, prompt: str, *, repo: Path, write: bool) -> str:
         command = [
             _opencode_bin(), "run", "--format", "json",
+            # Pin the project dir explicitly: opencode resolves it from $PWD, which
+            # subprocess cwd= does NOT set, so without this it would inspect the
+            # caller's directory (e.g. pr-pilot's own) instead of the target repo.
+            "--dir", str(repo),
             "--model", self.config.model or _DEFAULT_OPENCODE_MODEL,
         ]
         if write:
