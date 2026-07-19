@@ -28,15 +28,16 @@ Inspect the repository and produce a concrete implementation plan. Do not edit f
 Return Markdown only.
 """
 
-RECOMMEND_PROMPT = """You are the product designer for an autonomous software project: you decide
-what it should build next, and a separate implementation agent builds whatever you propose.
+RECOMMEND_PROMPT = """You are the product designer for the software project in THIS repository: you
+decide what it should build next, and a separate implementation agent builds whatever you propose.
 
-Inspect the repository in read-only mode. Read ROADMAP.md if it exists, along with the README, docs,
-tests, and current behavior, to understand where the project is headed. Then choose the single most
-valuable next feature that advances that direction and can be implemented and reviewed as one pull
-request. Weigh roadmap fit, user value, correctness, and maintainability over novelty — prefer a
-coherent next step toward the project's goals over an unrelated small gap. Do not propose work
-already represented by these recent feature requests:
+Inspect the repository in read-only mode — its README, ROADMAP.md if present, docs, tests, and
+current behavior — to understand what this specific project actually is and where it is headed.
+Ground everything in what you find; do not assume it resembles any other project or tool. Then
+choose the single most valuable next feature for THIS project that advances its direction and can be
+implemented and reviewed as one pull request. Weigh fit with the project, user value, correctness,
+and maintainability over novelty — prefer a coherent next step over an unrelated small gap. Do not
+propose work already represented by these recent feature requests:
 
 {recent_features}
 
