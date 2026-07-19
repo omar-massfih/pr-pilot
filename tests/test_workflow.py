@@ -34,9 +34,13 @@ class FakeRepo:
         self.commits = []
         self.pushes = []
         self.checked_out_bases = []
+        self.detected_branch = None  # None => fall back to config base_branch
 
     def validate(self):
         pass
+
+    def default_branch(self):
+        return self.detected_branch
 
     def fingerprint(self):
         return "unchanged"
@@ -122,6 +126,29 @@ class WorkflowTests(unittest.TestCase):
             # are fed in so it doesn't repeat them.
             self.assertEqual(designer.calls[0][1], False)
             self.assertIn("Add JSON output", designer.calls[0][0])
+
+    def test_detected_default_branch_overrides_config_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                repo=root,
+                memory=MemoryConfig(enabled=False),
+                state_dir=root / "state",
+            )
+            workflow = Workflow(
+                config,
+                implementer=FakeProvider([]),
+                reviewer=FakeProvider([]),
+                designer=FakeProvider(["a feature"]),
+            )
+            repo = FakeRepo()
+            repo.detected_branch = "master"  # e.g. a master-default frontend
+            workflow.repo = repo
+
+            workflow.recommend_feature()
+
+            # The repo's real default wins over the configured "main".
+            self.assertEqual(repo.checked_out_bases, ["master"])
 
     def test_recommendation_can_stop_the_autonomous_loop(self):
         with tempfile.TemporaryDirectory() as directory:

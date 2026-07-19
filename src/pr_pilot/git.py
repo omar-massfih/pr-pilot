@@ -21,6 +21,22 @@ class GitRepo:
     def status(self) -> str:
         return run(["git", "status", "--porcelain"], cwd=self.path).stdout.strip()
 
+    def default_branch(self) -> str | None:
+        """The remote's default branch (``origin/HEAD`` target), or None if unset.
+
+        Lets one instance serve repos with different defaults (e.g. a `master`
+        frontend and a `main` backend) without a per-repo base setting. `git
+        clone` records origin/HEAD; None falls the caller back to config.
+        """
+        result = run(
+            ["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            cwd=self.path,
+            check=False,
+        )
+        ref = result.stdout.strip()
+        prefix = "refs/remotes/origin/"
+        return ref[len(prefix):] if ref.startswith(prefix) else None
+
     def create_branch(self, feature: str, base: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", feature.lower()).strip("-")[:42] or "feature"
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")

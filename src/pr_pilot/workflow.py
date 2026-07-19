@@ -137,13 +137,22 @@ class Workflow:
         self.memory = memory
         self.sleep = sleeper
 
+    def _base_branch(self) -> str:
+        """The repo's actual default branch, falling back to the configured one.
+
+        Detected per repo (origin/HEAD) so one instance can serve repos with
+        different defaults; ``github.base_branch`` is the fallback when a clone
+        didn't record origin/HEAD.
+        """
+        return self.repo.default_branch() or self.config.github.base_branch
+
     def reset_worktree(self) -> None:
         """Return the repo to a clean base branch (see GitRepo.reset_to_base)."""
-        self.repo.reset_to_base(self.config.github.base_branch)
+        self.repo.reset_to_base(self._base_branch())
 
     def recommend_feature(self) -> str | None:
         self.repo.validate()
-        self.repo.checkout_base(self.config.github.base_branch)
+        self.repo.checkout_base(self._base_branch())
         recent = self.store.recent_features()
         recent_features = "\n".join(f"- {feature}" for feature in recent) or "- None"
         recommendation = self._invoke_read_only(
@@ -165,7 +174,7 @@ class Workflow:
         state = RunState(run_id=run_id, feature=feature, repo=str(self.config.repo))
         self.store.save(state)
 
-        state.branch = self.repo.create_branch(feature, self.config.github.base_branch)
+        state.branch = self.repo.create_branch(feature, self._base_branch())
         state.phase = "planning"
         self.store.save(state)
         memory_project: Project | None = None
@@ -239,7 +248,7 @@ class Workflow:
         state.pr_url = self.github.create_pr(
             title=title,
             body=body,
-            base=self.config.github.base_branch,
+            base=self._base_branch(),
             draft=self.config.github.draft,
         )
         state.phase = "pr_open"
