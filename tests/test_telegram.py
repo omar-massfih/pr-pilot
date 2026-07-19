@@ -68,8 +68,27 @@ class TelegramLoopTests(unittest.TestCase):
             return {"ok": True, "result": {}}
 
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "tok"}):
-            bot = TelegramBot(config, lambda: workflow, transport=transport)
+            bot = TelegramBot(config, lambda _path: workflow, transport=transport)
         return bot, workflow
+
+    def _multi_repo_bot(self, repos: dict):
+        """A bot with several named repos, each mapped to its own FakeWorkflow."""
+        config = Config(
+            repo=next(iter(repos.values())),
+            repos=repos,
+            telegram=TelegramConfig(allowed_chat_ids=(CHAT,)),
+        )
+        workflows = {path: FakeWorkflow([f"{name}-feature"]) for name, path in repos.items()}
+        self.sent = []
+
+        def transport(method, values):
+            if method == "sendMessage":
+                self.sent.append(values["text"])
+            return {"ok": True, "result": {}}
+
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "tok"}):
+            bot = TelegramBot(config, lambda path: workflows[path], transport=transport)
+        return bot, workflows
 
     def test_auto_suggests_and_sets_pending(self):
         bot, workflow = self._bot(["Add a --json flag"])
@@ -130,6 +149,39 @@ class TelegramLoopTests(unittest.TestCase):
         bot._handle(_msg("just some chatter"))
         self.assertEqual(workflow.runs, [])
         self.assertTrue(any("PR Pilot commands" in text for text in self.sent))
+
+    def test_repo_defaults_to_first_and_switch_targets_selected_workflow(self):
+        bot, workflows = self._multi_repo_bot(
+            {"frontend": Path("/a"), "backend": Path("/b")}
+        )
+        self.assertEqual(bot.active, "frontend")  # first repo is the default
+        bot._handle(_msg("/auto"))
+        self.assertEqual(bot.pending, "frontend-feature")
+        self.assertTrue(any("[frontend]" in text for text in self.sent))
+
+        bot._handle(_msg("/repo backend"))
+        self.assertEqual(bot.active, "backend")
+        self.assertIsNone(bot.pending)  # switching clears the pending suggestion
+
+        bot._handle(_msg("/auto"))
+        self.assertEqual(bot.pending, "backend-feature")
+        # /yes builds on the active repo's workflow, not the other.
+        bot._handle(_msg("/yes"))
+        self.assertEqual(workflows[Path("/b")].runs, [("backend-feature", True)])
+        self.assertEqual(workflows[Path("/a")].runs, [])
+
+    def test_repo_without_name_lists_repos(self):
+        bot, _ = self._multi_repo_bot({"frontend": Path("/a"), "backend": Path("/b")})
+        bot._handle(_msg("/repo"))
+        listing = self.sent[-1]
+        self.assertIn("frontend", listing)
+        self.assertIn("backend", listing)
+
+    def test_repo_unknown_name_is_rejected(self):
+        bot, _ = self._multi_repo_bot({"frontend": Path("/a")})
+        bot._handle(_msg("/repo nope"))
+        self.assertEqual(bot.active, "frontend")
+        self.assertTrue(any("Unknown repo" in text for text in self.sent))
 
     def test_stop_clears_pending(self):
         bot, _ = self._bot(["Alpha"])

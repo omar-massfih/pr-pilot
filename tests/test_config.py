@@ -85,6 +85,42 @@ reasoning_effort = "medium"
             with self.assertRaises(AgentShipError):
                 load_config(config_file)
 
+    def test_repos_table_parsed_with_first_as_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "frontend").mkdir()
+            (root / "backend").mkdir()
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'''[repos]
+frontend = "{root / "frontend"}"
+backend = "{root / "backend"}"
+'''
+            )
+            config = load_config(config_file)
+            self.assertEqual(set(config.repos), {"frontend", "backend"})
+            self.assertEqual(config.repos["backend"], (root / "backend").resolve())
+            # First entry is the default single repo.
+            self.assertEqual(config.repo, (root / "frontend").resolve())
+
+    def test_single_repo_is_exposed_as_main(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(f'repo = "{root}"\n')
+            config = load_config(config_file)
+            self.assertEqual(config.repos, {"main": root.resolve()})
+
+    def test_missing_named_repo_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'[repos]\ngood = "{root}"\nbad = "{root / "nope"}"\n'
+            )
+            with self.assertRaises(AgentShipError):
+                load_config(config_file)
+
     def test_rejects_unknown_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

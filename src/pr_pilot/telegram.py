@@ -6,6 +6,7 @@ import os
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import replace
 
 from .config import Config
 from .errors import AgentShipError
@@ -20,6 +21,7 @@ HELP = (
     "/no — skip it and suggest a different feature\n"
     "/edit <description> — revise the suggestion before building "
     "(or just send the revised text)\n"
+    "/repo [name] — list repos, or switch which one you're targeting\n"
     "/stop — end the auto loop\n"
     "/feature <description> — build a specific feature now"
 )
@@ -50,9 +52,15 @@ class TelegramBot:
         if not config.telegram.allowed_chat_ids:
             raise AgentShipError("telegram.allowed_chat_ids must contain at least one trusted chat ID")
         self.allowed = set(config.telegram.allowed_chat_ids)
-        self.workflow_factory = workflow_factory or (lambda: Workflow(config))
+        # One bot can target several repos (see Config.repos); commands act on the
+        # active one, /repo switches. Each repo gets its own lazily-built Workflow.
+        self.repos = dict(config.repos) or {"main": config.repo}
+        self.active = next(iter(self.repos))
+        self.workflow_factory = workflow_factory or (
+            lambda repo_path: Workflow(replace(config, repo=repo_path))
+        )
         self._transport = transport
-        self._workflow: Workflow | None = None
+        self._workflows: dict[str, Workflow] = {}
         self.pending: str | None = None
         # Resume from the last confirmed update so a restart neither reprocesses
         # old commands (a re-run /feature could rebuild) nor drops new ones.
@@ -90,11 +98,12 @@ class TelegramBot:
                 self._handle(update)
 
     def _workflow_instance(self) -> Workflow:
-        # One workflow per session so recommend/run share the same providers
-        # and memory; created lazily so construction errors surface on use.
-        if self._workflow is None:
-            self._workflow = self.workflow_factory()
-        return self._workflow
+        # One workflow per repo, shared across that repo's recommend/run so they
+        # use the same providers and memory; built lazily so construction errors
+        # surface on use.
+        if self.active not in self._workflows:
+            self._workflows[self.active] = self.workflow_factory(self.repos[self.active])
+        return self._workflows[self.active]
 
     def _handle(self, update: dict) -> None:
         message = update.get("message") or {}
@@ -114,6 +123,8 @@ class TelegramBot:
             self._approve(chat_id)
         elif command in ("/no", "/n", "/skip"):
             self._skip(chat_id)
+        elif command == "/repo":
+            self._switch_repo(chat_id, text.removeprefix("/repo").strip())
         elif command == "/stop":
             self.pending = None
             self.send(chat_id, "Auto loop stopped. Send /auto to start again.")
@@ -145,8 +156,26 @@ class TelegramBot:
         except Exception:
             logger.exception("worktree reset failed")
 
+    def _switch_repo(self, chat_id: int, name: str) -> None:
+        """List repos, or switch which one commands target (clears any pending)."""
+        if not name:
+            listing = "\n".join(
+                f"{'▶' if n == self.active else ' '} {n}" for n in self.repos
+            )
+            self.send(chat_id, f"Repos (▶ active):\n{listing}\n\nSwitch with /repo <name>.")
+            return
+        match = name if name in self.repos else next(
+            (n for n in self.repos if n.lower() == name.lower()), None
+        )
+        if match is None:
+            self.send(chat_id, f"Unknown repo '{name}'. Known: {', '.join(self.repos)}.")
+            return
+        self.active = match
+        self.pending = None
+        self.send(chat_id, f"Now targeting '{match}'. Send /auto for a suggestion.")
+
     def _suggest(self, chat_id: int) -> None:
-        self.send(chat_id, "Looking for the next feature to suggest…")
+        self.send(chat_id, f"[{self.active}] Looking for the next feature to suggest…")
         wf = self._workflow_instance()
         feature = None
         error: Exception | None = None
@@ -177,7 +206,7 @@ class TelegramBot:
         logger.info("suggested feature: %s", feature)
         self.send(
             chat_id,
-            f"💡 Suggested feature:\n\n{feature}\n\n"
+            f"💡 [{self.active}] Suggested feature:\n\n{feature}\n\n"
             "/yes to build it · /no for a different one · /stop to end.",
         )
 
@@ -219,13 +248,13 @@ class TelegramBot:
         logger.info("edited suggested feature: %s", feature)
         self.send(
             chat_id,
-            f"✏️ Updated suggestion:\n\n{feature}\n\n"
+            f"✏️ [{self.active}] Updated suggestion:\n\n{feature}\n\n"
             "/yes to build it · /no for a different one · /stop to end.",
         )
 
     def _build(self, chat_id: int, feature: str) -> None:
-        self.send(chat_id, "Accepted. Planning, implementation, and CI babysitting have started — this can take a while.")
-        logger.info("building feature: %s", feature)
+        self.send(chat_id, f"Accepted [{self.active}]. Planning, implementation, and CI babysitting have started — this can take a while.")
+        logger.info("building feature on %s: %s", self.active, feature)
         try:
             # watch=True: after opening the PR, babysit CI and address failures
             # before the loop moves on to the next suggestion.

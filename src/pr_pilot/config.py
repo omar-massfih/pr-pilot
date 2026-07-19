@@ -79,6 +79,11 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     state_dir: Path = Path("~/.pr-pilot").expanduser()
+    # Named repos this instance can target (name -> path). One Telegram bot can
+    # drive them all, switching with /repo; ``repo`` is the default (first). With
+    # no [repos] table it is just {"main": repo}, so single-repo setups are
+    # unchanged.
+    repos: dict[str, Path] = field(default_factory=dict)
 
     def with_repo(self, repo: Path) -> "Config":
         return replace(self, repo=repo.resolve())
@@ -103,7 +108,24 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
     elif path != Path("pr-pilot.toml"):
         raise AgentShipError(f"Configuration file does not exist: {path}")
 
-    configured_repo = repo or Path(data.get("repo", "."))
+    # Named repos from an optional [repos] table; the primary/default repo is the
+    # --repo override, else [repo], else the first [repos] entry, else ".".
+    repos_raw = data.get("repos", {})
+    repos = {
+        str(name): Path(str(target)).expanduser().resolve()
+        for name, target in (repos_raw.items() if isinstance(repos_raw, dict) else [])
+    }
+    if repo is not None:
+        primary = repo.resolve()
+    elif "repo" in data:
+        primary = Path(str(data["repo"])).expanduser().resolve()
+    elif repos:
+        primary = next(iter(repos.values()))
+    else:
+        primary = Path(".").resolve()
+    if not repos:
+        repos = {"main": primary}
+    configured_repo = primary
     gh = data.get("github", {})
     workflow = data.get("workflow", {})
     baby = data.get("babysit", {})
@@ -148,6 +170,7 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
             relationship_threshold=float(memory.get("relationship_threshold", 0.80)),
         ),
         state_dir=Path(data.get("state_dir", "~/.pr-pilot")).expanduser(),
+        repos=repos,
     )
     for role in ("implementer", "reviewer", "designer"):
         name = getattr(config, role).name
@@ -181,8 +204,9 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         raise AgentShipError("memory context limit must be positive and depth cannot be negative")
     if not 0.0 <= config.memory.relationship_threshold <= 1.0:
         raise AgentShipError("memory.relationship_threshold must be between 0 and 1")
-    if not config.repo.is_dir():
-        raise AgentShipError(f"Repository directory does not exist: {config.repo}")
-    if not os.access(config.repo, os.W_OK):
-        raise AgentShipError(f"Repository is not writable: {config.repo}")
+    for name, target in config.repos.items():
+        if not target.is_dir():
+            raise AgentShipError(f"Repository '{name}' directory does not exist: {target}")
+        if not os.access(target, os.W_OK):
+            raise AgentShipError(f"Repository '{name}' is not writable: {target}")
     return config

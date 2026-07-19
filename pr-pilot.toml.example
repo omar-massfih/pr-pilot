@@ -2,6 +2,14 @@
 repo = "/absolute/path/to/your/repository"
 state_dir = "~/.pr-pilot"
 
+# Optional: let one bot drive several repos, switched from Telegram with
+# `/repo <name>` (the first is the default). When set, `repo` above may be
+# omitted — the first entry becomes the default. Give each instance its own
+# state_dir so their run history / offsets don't collide.
+# [repos]
+# frontend = "/home/you/site"
+# backend  = "/home/you/site-backend"
+
 # Providers: "codex" or "cursor" (their CLIs, needing `codex`/`cursor-agent` on
 # PATH), "chatgpt" — chatgpt.com's backend over HTTP, reusing the OAuth tokens
 # from `codex login` (~/.codex/auth.json), no extra binary — or "opencode", the
