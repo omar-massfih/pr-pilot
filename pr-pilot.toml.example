@@ -3,10 +3,14 @@ repo = "/absolute/path/to/your/repository"
 state_dir = "~/.pr-pilot"
 
 # Providers: "codex" or "cursor" (their CLIs, needing `codex`/`cursor-agent` on
-# PATH), or "chatgpt" — chatgpt.com's backend over HTTP, reusing the OAuth tokens
-# from `codex login` (~/.codex/auth.json), no extra binary. chatgpt drives the
-# repo through an inspect/edit agent loop, so it works for every role; its model
-# must be a codex-supported id (default gpt-5.5).
+# PATH), "chatgpt" — chatgpt.com's backend over HTTP, reusing the OAuth tokens
+# from `codex login` (~/.codex/auth.json), no extra binary — or "opencode", the
+# opencode CLI headless. chatgpt drives the repo through pr-pilot's own
+# inspect/edit loop; opencode brings its own agent loop and native tool calling,
+# so it offloads the coding — point it at any OpenAI-compatible endpoint via
+# ~/.config/opencode/opencode.json and set model to a "provider/model" slug (e.g.
+# "chatgpt-proxy/gpt-5.5"). Read-only roles use opencode's built-in `plan` agent;
+# writing roles run the build agent with --auto. Model ids must be codex-supported.
 [implementer]
 name = "codex"
 # model = "optional-model-name"

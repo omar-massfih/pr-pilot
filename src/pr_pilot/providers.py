@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -79,6 +81,87 @@ class ChatGptProvider(AgentProvider):
         )
 
 
+# Default provider/model slug for opencode — an OpenAI-compatible provider named
+# `chatgpt-proxy` in ~/.config/opencode/opencode.json, pointed at the proxy.
+_DEFAULT_OPENCODE_MODEL = "chatgpt-proxy/gpt-5.5"
+
+
+def _opencode_bin() -> str:
+    """Locate the opencode binary: $OPENCODE_BIN, then PATH, then the installer's
+    default (~/.opencode/bin) — the last matters under systemd, whose PATH won't
+    include the per-user install dir."""
+    override = os.environ.get("OPENCODE_BIN")
+    if override:
+        return override
+    found = shutil.which("opencode")
+    if found:
+        return found
+    fallback = Path.home() / ".opencode" / "bin" / "opencode"
+    return str(fallback) if fallback.exists() else "opencode"
+
+
+def _opencode_text(output: str) -> str:
+    """The assistant's final message from an ``opencode run --format json`` stream.
+
+    The stream is JSONL; assistant prose arrives as ``type:"text"`` parts (each
+    with a stable ``part.id``). Collect the latest text per part in arrival order
+    and join them, so a message split around tool calls comes back whole and its
+    last line — the reviewer's ``VERDICT:`` — is preserved.
+    """
+    texts: dict[str, str] = {}
+    order: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "text":
+            continue
+        part = event.get("part") or {}
+        pid, text = part.get("id"), part.get("text")
+        if isinstance(pid, str) and isinstance(text, str):
+            if pid not in texts:
+                order.append(pid)
+            texts[pid] = text
+    return "\n\n".join(texts[pid] for pid in order).strip()
+
+
+class OpencodeProvider(AgentProvider):
+    """Drive the opencode CLI headless, pointed at an OpenAI-compatible endpoint.
+
+    opencode brings its own agent loop and native tool calling, so pr-pilot just
+    hands it a prompt and reads the final message. Writing roles run the default
+    build agent with ``--auto`` (auto-approve edits/commands); read-only roles run
+    the built-in read-only ``plan`` agent, so plan/review/designer never touch the
+    tree. The model is a ``provider/model`` slug (default ``chatgpt-proxy/gpt-5.5``,
+    the proxy provider defined in opencode's config).
+    """
+
+    def __init__(self, config: ProviderConfig):
+        self.config = config
+
+    def invoke(self, prompt: str, *, repo: Path, write: bool) -> str:
+        command = [
+            _opencode_bin(), "run", "--format", "json",
+            "--model", self.config.model or _DEFAULT_OPENCODE_MODEL,
+        ]
+        if write:
+            command.append("--auto")          # build agent, auto-approve edits
+        else:
+            command.extend(["--agent", "plan"])  # read-only agent
+        if self.config.reasoning_effort:
+            command.extend(["--variant", self.config.reasoning_effort])
+        command.append(prompt)
+        output = run(command, cwd=repo).stdout
+        text = _opencode_text(output)
+        if not text:
+            raise AgentShipError("opencode returned no assistant message")
+        return text
+
+
 class LimitRetryProvider(AgentProvider):
     def __init__(
         self,
@@ -130,6 +213,8 @@ def make_provider(config: ProviderConfig) -> AgentProvider:
         provider = CursorProvider(config)
     elif config.name == "chatgpt":
         provider = ChatGptProvider(config)
+    elif config.name == "opencode":
+        provider = OpencodeProvider(config)
     else:
         raise AgentShipError(f"Unknown provider: {config.name}")
     return LimitRetryProvider(provider, config)

@@ -15,6 +15,8 @@ from pr_pilot.providers import (
     CodexProvider,
     CursorProvider,
     LimitRetryProvider,
+    OpencodeProvider,
+    _opencode_text,
     make_provider,
 )
 
@@ -84,6 +86,57 @@ class ProviderTests(unittest.TestCase):
                 "review", repo=Path("."), write=False
             )
         self.assertEqual(mocked.call_args.kwargs["effort"], "medium")
+
+    def test_opencode_read_role_uses_read_only_plan_agent(self):
+        stream = json.dumps({"type": "text", "part": {"id": "p1", "text": "the plan"}})
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "pr_pilot.providers.run", return_value=Result(stream, "", 0)
+        ) as mocked, patch("pr_pilot.providers._opencode_bin", return_value="opencode"):
+            output = OpencodeProvider(ProviderConfig("opencode")).invoke(
+                "plan it", repo=Path(directory), write=False
+            )
+        command = mocked.call_args.args[0]
+        self.assertEqual(output, "the plan")
+        self.assertIn("--agent", command)
+        self.assertIn("plan", command)
+        self.assertNotIn("--auto", command)
+        self.assertIn("chatgpt-proxy/gpt-5.5", command)  # default model slug
+
+    def test_opencode_write_role_uses_auto_not_plan_agent(self):
+        stream = json.dumps({"type": "text", "part": {"id": "p1", "text": "done"}})
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "pr_pilot.providers.run", return_value=Result(stream, "", 0)
+        ) as mocked, patch("pr_pilot.providers._opencode_bin", return_value="opencode"):
+            OpencodeProvider(
+                ProviderConfig("opencode", reasoning_effort="high")
+            ).invoke("implement", repo=Path(directory), write=True)
+        command = mocked.call_args.args[0]
+        self.assertIn("--auto", command)
+        self.assertNotIn("plan", command)
+        self.assertEqual(command[command.index("--variant") + 1], "high")
+
+    def test_opencode_raises_when_no_message(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "pr_pilot.providers.run", return_value=Result("", "", 0)
+        ), patch("pr_pilot.providers._opencode_bin", return_value="opencode"):
+            with self.assertRaises(AgentShipError):
+                OpencodeProvider(ProviderConfig("opencode")).invoke(
+                    "x", repo=Path(directory), write=False
+                )
+
+    def test_opencode_text_joins_parts_and_preserves_last_line(self):
+        stream = "\n".join([
+            json.dumps({"type": "step_start", "part": {"id": "s", "type": "step-start"}}),
+            json.dumps({"type": "text", "part": {"id": "p1", "text": "Findings: ok."}}),
+            json.dumps({"type": "text", "part": {"id": "p2", "text": "VERDICT: APPROVE"}}),
+            "not json, ignored",
+        ])
+        text = _opencode_text(stream)
+        assert text.splitlines()[-1] == "VERDICT: APPROVE"
+        self.assertIn("Findings: ok.", text)
+
+    def test_make_provider_wires_opencode(self):
+        self.assertIsInstance(make_provider(ProviderConfig("opencode")), LimitRetryProvider)
 
     def test_make_provider_wires_chatgpt(self):
         provider = make_provider(ProviderConfig("chatgpt"))

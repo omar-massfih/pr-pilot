@@ -7,6 +7,9 @@ from pathlib import Path
 
 from .errors import AgentShipError
 
+# Recognized agent-provider backends (see :mod:`pr_pilot.providers`).
+_PROVIDER_NAMES = frozenset({"codex", "cursor", "chatgpt", "opencode"})
+
 
 @dataclass(frozen=True)
 class ProviderConfig:
@@ -146,12 +149,12 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         ),
         state_dir=Path(data.get("state_dir", "~/.pr-pilot")).expanduser(),
     )
-    if config.implementer.name not in {"codex", "cursor", "chatgpt"}:
-        raise AgentShipError("implementer.name must be 'codex', 'cursor', or 'chatgpt'")
-    if config.reviewer.name not in {"codex", "cursor", "chatgpt"}:
-        raise AgentShipError("reviewer.name must be 'codex', 'cursor', or 'chatgpt'")
-    if config.designer.name not in {"codex", "cursor", "chatgpt"}:
-        raise AgentShipError("designer.name must be 'codex', 'cursor', or 'chatgpt'")
+    for role in ("implementer", "reviewer", "designer"):
+        name = getattr(config, role).name
+        if name not in _PROVIDER_NAMES:
+            raise AgentShipError(
+                f"{role}.name must be one of {', '.join(sorted(_PROVIDER_NAMES))}"
+            )
     if config.workflow.max_review_attempts < 0:
         raise AgentShipError("workflow.max_review_attempts cannot be negative")
     for provider in (config.implementer, config.reviewer, config.designer):
@@ -163,12 +166,10 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
             raise AgentShipError(
                 "provider reasoning_effort must be minimal, low, medium, or high"
             )
-    if config.memory.profile_provider not in {
-        "implementer", "reviewer", "codex", "cursor", "chatgpt",
-    }:
+    if config.memory.profile_provider not in {"implementer", "reviewer", *_PROVIDER_NAMES}:
         raise AgentShipError(
-            "memory.profile_provider must be implementer, reviewer, codex, "
-            "cursor, or chatgpt"
+            "memory.profile_provider must be 'implementer', 'reviewer', or a "
+            f"provider name ({', '.join(sorted(_PROVIDER_NAMES))})"
         )
     if config.memory.chunk_overlap >= config.memory.chunk_chars:
         raise AgentShipError("memory.chunk_overlap must be smaller than memory.chunk_chars")
