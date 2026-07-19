@@ -103,13 +103,17 @@ def _opencode_bin() -> str:
 def _opencode_text(output: str) -> str:
     """The assistant's final message from an ``opencode run --format json`` stream.
 
-    The stream is JSONL; assistant prose arrives as ``type:"text"`` parts (each
-    with a stable ``part.id``). Collect the latest text per part in arrival order
-    and join them, so a message split around tool calls comes back whole and its
-    last line — the reviewer's ``VERDICT:`` — is preserved.
+    The stream is JSONL grouped into steps (``step_start`` events). opencode
+    narrates as it works — emitting ``text`` parts in the earlier tool-using
+    steps — and gives the actual answer in the final step. Return that final
+    step's text (joining its parts), skipping the thinking, so a designer's
+    feature request or a reviewer's findings+verdict come back clean and don't
+    leak into branch names, PR titles, or the repair prompt. With no step markers
+    at all, every text is one step — i.e. the old join-everything behavior.
     """
-    texts: dict[str, str] = {}
+    steps: list[list[str]] = []
     order: list[str] = []
+    texts: dict[str, str] = {}
     for line in output.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -118,15 +122,25 @@ def _opencode_text(output: str) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "text":
-            continue
-        part = event.get("part") or {}
-        pid, text = part.get("id"), part.get("text")
-        if isinstance(pid, str) and isinstance(text, str):
-            if pid not in texts:
-                order.append(pid)
-            texts[pid] = text
-    return "\n\n".join(texts[pid] for pid in order).strip()
+        kind = event.get("type")
+        if kind == "step_start":
+            if order:
+                steps.append([texts[pid] for pid in order])
+            order, texts = [], {}
+        elif kind == "text":
+            part = event.get("part") or {}
+            pid, text = part.get("id"), part.get("text")
+            if isinstance(pid, str) and isinstance(text, str):
+                if pid not in texts:
+                    order.append(pid)
+                texts[pid] = text
+    if order:
+        steps.append([texts[pid] for pid in order])
+    for parts in reversed(steps):
+        answer = "\n\n".join(parts).strip()
+        if answer:
+            return answer
+    return ""
 
 
 class OpencodeProvider(AgentProvider):

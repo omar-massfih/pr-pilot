@@ -67,9 +67,15 @@ Implementation plan:
 
 {memory_context}
 
-Review every uncommitted change in the working tree. Look for correctness bugs, regressions,
-security issues, missing edge cases, and inadequate tests. Report actionable findings with file and
-line references, ordered by severity. If there are no blocking findings, say so.
+The uncommitted changes to review (working-tree diff; new files shown in full):
+
+--- BEGIN CHANGES ---
+{diff}
+--- END CHANGES ---
+
+Review these changes, reading the surrounding code for context as needed. Look for correctness bugs,
+regressions, security issues, missing edge cases, and inadequate tests. Report actionable findings
+with file and line references, ordered by severity. If there are no blocking findings, say so.
 
 End with exactly one of:
 VERDICT: APPROVE
@@ -165,6 +171,17 @@ class Workflow:
     def _workspace_fingerprint(self) -> str:
         return "|".join(repo.fingerprint() for _, repo, _ in self._targets())
 
+    def _working_diff(self) -> str:
+        """The uncommitted changes across every member, for the reviewer prompt."""
+        targets = self._targets()
+        multi = len(targets) > 1
+        blocks = []
+        for name, repo, _ in targets:
+            diff = repo.working_diff()
+            if diff.strip():
+                blocks.append(f"# Repository: {name}\n{diff}" if multi else diff)
+        return "\n\n".join(blocks) or "(no textual diff available; inspect the files directly)"
+
     def reset_worktree(self) -> None:
         """Return every member repo to a clean base branch."""
         for _, repo, _ in self._targets():
@@ -242,6 +259,7 @@ class Workflow:
                     feature=feature,
                     plan=state.plan,
                     memory_context=memory_review_context,
+                    diff=self._working_diff(),
                 ),
             )
             self.store.save(state)

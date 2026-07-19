@@ -61,6 +61,9 @@ class FakeRepo:
     def has_changes(self):
         return self.changed
 
+    def working_diff(self, limit=20_000):
+        return "diff --git a/x b/x" if self.changed else ""
+
     def commit(self, message):
         self.commits.append(message)
         self.changed = False

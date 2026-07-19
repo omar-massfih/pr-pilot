@@ -126,6 +126,19 @@ class ProviderTests(unittest.TestCase):
                     "x", repo=Path(directory), write=False
                 )
 
+    def test_opencode_text_returns_only_the_final_step(self):
+        # Narration in earlier (tool-using) steps must be dropped; only the final
+        # step's text is the answer, so it doesn't pollute branch names / titles.
+        stream = "\n".join([
+            json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
+            json.dumps({"type": "text", "part": {"id": "n1", "text": "I'll inspect the repo."}}),
+            json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
+            json.dumps({"type": "text", "part": {"id": "n2", "text": "Reading docs and tests."}}),
+            json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
+            json.dumps({"type": "text", "part": {"id": "a", "text": "Add a client-side notes search."}}),
+        ])
+        self.assertEqual(_opencode_text(stream), "Add a client-side notes search.")
+
     def test_opencode_text_joins_parts_and_preserves_last_line(self):
         stream = "\n".join([
             json.dumps({"type": "step_start", "part": {"id": "s", "type": "step-start"}}),

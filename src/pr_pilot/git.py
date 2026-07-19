@@ -61,6 +61,32 @@ class GitRepo:
     def has_changes(self) -> bool:
         return bool(self.status())
 
+    def working_diff(self, limit: int = 20_000) -> str:
+        """The uncommitted changes as review-ready text.
+
+        ``git diff`` for tracked edits plus the full content of new untracked
+        files (which a diff omits). Non-mutating and bounded — so a reviewer that
+        can't run git itself (an agent pointed at a non-git workspace root) still
+        gets the real change set instead of guessing.
+        """
+        blocks: list[str] = []
+        tracked = run(["git", "diff"], cwd=self.path).stdout
+        if tracked.strip():
+            blocks.append(tracked)
+        untracked = run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=self.path
+        ).stdout.split("\0")
+        for rel in sorted(item for item in untracked if item):
+            path = self.path / rel
+            if path.is_file():
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                blocks.append(f"--- NEW FILE: {rel} ---\n{content}")
+        diff = "\n\n".join(blocks)
+        return diff[:limit] + "\n… [diff truncated]" if len(diff) > limit else diff
+
     def reset_to_base(self, base: str) -> None:
         """Discard all working-tree changes and return to a clean base branch.
 
