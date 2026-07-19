@@ -126,8 +126,16 @@ class Workflow:
         sleeper=time.sleep,
     ):
         self.config = config
+        # Single-member handles — also what the single-repo tests inject into.
         self.repo = GitRepo(config.repo)
         self.github = GitHub(config.repo)
+        # Where the agent runs: a group's shared workspace (which contains every
+        # member repo, so the agent sees and edits them together), else the repo.
+        self.workspace = config.workspace or config.repo
+        self._group = config.workspace is not None
+        if self._group:
+            self.members = {name: GitRepo(path) for name, path in config.repos.items()}
+            self.member_github = {name: GitHub(path) for name, path in config.repos.items()}
         self.implementer = implementer or make_provider(config.implementer)
         self.reviewer = reviewer or make_provider(config.reviewer)
         self.designer = designer or make_provider(config.designer)
@@ -135,22 +143,37 @@ class Workflow:
         self.memory = memory
         self.sleep = sleeper
 
-    def _base_branch(self) -> str:
-        """The repo's actual default branch, falling back to the configured one.
+    def _targets(self) -> list[tuple[str, GitRepo, GitHub]]:
+        """The (name, repo, github) triples to validate/branch/commit/PR.
 
-        Detected per repo (origin/HEAD) so one instance can serve repos with
-        different defaults; ``github.base_branch`` is the fallback when a clone
-        didn't record origin/HEAD.
+        A group yields one per member repo; a single repo yields one, read from
+        ``self.repo``/``self.github`` at call time so tests can inject fakes.
         """
-        return self.repo.default_branch() or self.config.github.base_branch
+        if self._group:
+            return [(n, self.members[n], self.member_github[n]) for n in self.members]
+        return [("main", self.repo, self.github)]
+
+    def _base_branch(self, repo: GitRepo) -> str:
+        """A repo's actual default branch (origin/HEAD), else the configured base.
+
+        Detected per repo so one instance can serve repos with different defaults
+        (a master frontend, a main backend); ``github.base_branch`` is the
+        fallback when a clone didn't record origin/HEAD.
+        """
+        return repo.default_branch() or self.config.github.base_branch
+
+    def _workspace_fingerprint(self) -> str:
+        return "|".join(repo.fingerprint() for _, repo, _ in self._targets())
 
     def reset_worktree(self) -> None:
-        """Return the repo to a clean base branch (see GitRepo.reset_to_base)."""
-        self.repo.reset_to_base(self._base_branch())
+        """Return every member repo to a clean base branch."""
+        for _, repo, _ in self._targets():
+            repo.reset_to_base(self._base_branch(repo))
 
     def recommend_feature(self) -> str | None:
-        self.repo.validate()
-        self.repo.checkout_base(self._base_branch())
+        for _, repo, _ in self._targets():
+            repo.validate()
+            repo.checkout_base(self._base_branch(repo))
         recent = self.store.recent_features()
         recent_features = "\n".join(f"- {feature}" for feature in recent) or "- None"
         recommendation = self._invoke_read_only(
@@ -167,19 +190,25 @@ class Workflow:
         feature = feature.strip()
         if not feature:
             raise AgentShipError("Feature request cannot be empty")
-        self.repo.validate()
+        targets = self._targets()
+        for _, repo, _ in targets:
+            repo.validate()
         run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
-        state = RunState(run_id=run_id, feature=feature, repo=str(self.config.repo))
+        state = RunState(run_id=run_id, feature=feature, repo=str(self.workspace))
         self.store.save(state)
 
-        state.branch = self.repo.create_branch(feature, self._base_branch())
+        # One shared branch name across every member, cut from each one's base.
+        branch = GitRepo.branch_name(feature)
+        for _, repo, _ in targets:
+            repo.start_branch(branch, self._base_branch(repo))
+        state.branch = branch
         state.phase = "planning"
         self.store.save(state)
         memory_project: Project | None = None
         memory_context = ""
         if self.config.memory.enabled:
             self.memory = self.memory or MemoryService(self.config)
-            memory_project = self.memory.db.project_for_path(self.config.repo)
+            memory_project = self.memory.db.project_for_path(self.workspace)
             if memory_project:
                 self.memory.index_related(memory_project)
                 memory_context = self._memory_context(feature, memory_project)
@@ -194,10 +223,10 @@ class Workflow:
         self.store.save(state)
         self.implementer.invoke(
             IMPLEMENT_PROMPT.format(feature=feature, plan=state.plan),
-            repo=self.config.repo,
+            repo=self.workspace,
             write=True,
         )
-        if not self.repo.has_changes():
+        if not any(repo.has_changes() for _, repo, _ in targets):
             raise AgentShipError("The implementation agent completed without changing any files")
 
         memory_review_context = (
@@ -231,7 +260,7 @@ class Workflow:
             self.store.save(state)
             self.implementer.invoke(
                 REPAIR_PROMPT.format(feature=feature, review=state.review),
-                repo=self.config.repo,
+                repo=self.workspace,
                 write=True,
             )
         if self.memory and memory_project:
@@ -240,22 +269,33 @@ class Workflow:
         state.phase = "publishing"
         self.store.save(state)
         title = feature.splitlines()[0][:72]
-        self.repo.commit(f"feat: {title}")
-        self.repo.push(state.branch)
         body = f"## Feature\n\n{feature}\n\n## Plan\n\n{state.plan}\n\n## Agent review\n\n{state.review}"
-        state.pr_url = self.github.create_pr(
-            title=title,
-            body=body,
-            base=self._base_branch(),
-            draft=self.config.github.draft,
-        )
+        multi = len(targets) > 1
+        pr_urls: list[str] = []
+        for name, repo, github in targets:
+            if not repo.has_changes():
+                # A group member the agent didn't touch: drop its empty branch.
+                repo.reset_to_base(self._base_branch(repo))
+                continue
+            repo.commit(f"feat: {title}")
+            repo.push(branch)
+            url = github.create_pr(
+                title=title,
+                body=body,
+                base=self._base_branch(repo),
+                draft=self.config.github.draft,
+            )
+            pr_urls.append(f"{name}: {url}" if multi else url)
+        state.pr_url = "\n".join(pr_urls)
         state.phase = "pr_open"
         self.store.save(state)
         if self.memory and memory_project:
             self.memory.record_run(state)
 
+        # CI babysitting follows one PR; for a multi-repo group we open the PRs
+        # and stop (babysitting several PRs at once isn't supported yet).
         should_watch = self.config.babysit.enabled if watch is None else watch
-        if should_watch:
+        if should_watch and not multi:
             return self.babysit(state)
         return state
 
@@ -307,9 +347,9 @@ class Workflow:
         return "\n".join(lines)
 
     def _invoke_read_only(self, provider: AgentProvider, prompt: str) -> str:
-        before = self.repo.fingerprint()
-        response = provider.invoke(prompt, repo=self.config.repo, write=False)
-        if self.repo.fingerprint() != before:
+        before = self._workspace_fingerprint()
+        response = provider.invoke(prompt, repo=self.workspace, write=False)
+        if self._workspace_fingerprint() != before:
             raise AgentShipError("A read-only planning/review agent modified the repository")
         return response
 

@@ -37,12 +37,21 @@ class GitRepo:
         prefix = "refs/remotes/origin/"
         return ref[len(prefix):] if ref.startswith(prefix) else None
 
-    def create_branch(self, feature: str, base: str) -> str:
+    @staticmethod
+    def branch_name(feature: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", feature.lower()).strip("-")[:42] or "feature"
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        branch = f"agent/{slug}-{stamp}"
+        return f"agent/{slug}-{stamp}"
+
+    def start_branch(self, branch: str, base: str) -> None:
+        """Create ``branch`` off a fresh ``base`` (shared across a repo group so
+        every member's PR rides the same branch name)."""
         self.checkout_base(base)
         run(["git", "switch", "-c", branch], cwd=self.path)
+
+    def create_branch(self, feature: str, base: str) -> str:
+        branch = self.branch_name(feature)
+        self.start_branch(branch, base)
         return branch
 
     def checkout_base(self, base: str) -> None:

@@ -84,6 +84,11 @@ class Config:
     # no [repos] table it is just {"main": repo}, so single-repo setups are
     # unchanged.
     repos: dict[str, Path] = field(default_factory=dict)
+    # When set, the [repos] are one *group* worked together: the agent runs in
+    # this workspace dir (which must contain every member repo) so it sees and
+    # edits them all at once, and a PR is opened per member repo that changed.
+    # Unset => each repo is an independent /repo-switchable target.
+    workspace: Path | None = None
 
     def with_repo(self, repo: Path) -> "Config":
         return replace(self, repo=repo.resolve())
@@ -171,6 +176,10 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         ),
         state_dir=Path(data.get("state_dir", "~/.pr-pilot")).expanduser(),
         repos=repos,
+        workspace=(
+            Path(str(data["workspace"])).expanduser().resolve()
+            if data.get("workspace") else None
+        ),
     )
     for role in ("implementer", "reviewer", "designer"):
         name = getattr(config, role).name
@@ -209,4 +218,12 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
             raise AgentShipError(f"Repository '{name}' directory does not exist: {target}")
         if not os.access(target, os.W_OK):
             raise AgentShipError(f"Repository '{name}' is not writable: {target}")
+    if config.workspace is not None:
+        if not config.workspace.is_dir():
+            raise AgentShipError(f"workspace directory does not exist: {config.workspace}")
+        for name, target in config.repos.items():
+            if config.workspace != target and config.workspace not in target.parents:
+                raise AgentShipError(
+                    f"repo '{name}' ({target}) is not inside workspace {config.workspace}"
+                )
     return config

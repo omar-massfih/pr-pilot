@@ -48,7 +48,14 @@ class FakeRepo:
     def create_branch(self, feature, base):
         return "agent/test-branch"
 
+    def start_branch(self, branch, base):
+        self.checked_out_bases.append(base)
+        self.branch = branch
+
     def checkout_base(self, base):
+        self.checked_out_bases.append(base)
+
+    def reset_to_base(self, base):
         self.checked_out_bases.append(base)
 
     def has_changes(self):
@@ -191,6 +198,39 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual([call[1] for call in implementer.calls], [False, True])
             self.assertEqual([call[1] for call in reviewer.calls], [False])
             self.assertEqual(len(workflow.repo.commits), 1)
+
+    def test_group_opens_a_pr_per_changed_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fe, be = root / "frontend", root / "backend"
+            config = Config(
+                repo=fe,
+                repos={"frontend": fe, "backend": be},
+                workspace=root,
+                github=GitHubConfig(draft=True),
+                babysit=BabysitConfig(enabled=False),
+                memory=MemoryConfig(enabled=False),
+                state_dir=root / "state",
+            )
+            implementer = FakeProvider(["the plan", "implemented"])
+            reviewer = FakeProvider(["ok\nVERDICT: APPROVE"])
+            workflow = Workflow(config, implementer=implementer, reviewer=reviewer)
+            fe_repo, be_repo = FakeRepo(), FakeRepo()
+            fe_repo.changed = True  # only the frontend was edited
+            fe_gh, be_gh = FakeGitHub(), FakeGitHub()
+            workflow.members = {"frontend": fe_repo, "backend": be_repo}
+            workflow.member_github = {"frontend": fe_gh, "backend": be_gh}
+
+            state = workflow.run("Add full-stack search", watch=False)
+
+            # A PR only for the repo that changed; the untouched one is reset.
+            self.assertEqual(len(fe_gh.created), 1)
+            self.assertEqual(len(be_gh.created), 0)
+            self.assertEqual(len(fe_repo.commits), 1)
+            self.assertEqual(len(be_repo.commits), 0)
+            self.assertIn("frontend:", state.pr_url)
+            # The agent ran once in the shared workspace per phase (plan, implement).
+            self.assertEqual([call[1] for call in implementer.calls], [False, True])
 
     def test_review_and_repair_loops_until_approval_before_opening_pr(self):
         with tempfile.TemporaryDirectory() as directory:

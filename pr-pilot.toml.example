@@ -10,6 +10,15 @@ state_dir = "~/.pr-pilot"
 # frontend = "/home/you/site"
 # backend  = "/home/you/site-backend"
 
+# Optional group mode: set `workspace` to a dir that CONTAINS every [repos] entry.
+# The agent then runs in that workspace and sees/edits all members at once (for
+# full-stack features), and a PR is opened per member repo that actually changed.
+# Omit it to keep the repos independent (/repo-switchable). Example layout:
+#   workspace = "/home/you/site-workspace"   # contains frontend/ and backend/
+# [repos]
+#   frontend = "/home/you/site-workspace/frontend"
+#   backend  = "/home/you/site-workspace/backend"
+
 # Providers: "codex" or "cursor" (their CLIs, needing `codex`/`cursor-agent` on
 # PATH), "chatgpt" — chatgpt.com's backend over HTTP, reusing the OAuth tokens
 # from `codex login` (~/.codex/auth.json), no extra binary — or "opencode", the

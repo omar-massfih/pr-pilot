@@ -52,9 +52,13 @@ class TelegramBot:
         if not config.telegram.allowed_chat_ids:
             raise AgentShipError("telegram.allowed_chat_ids must contain at least one trusted chat ID")
         self.allowed = set(config.telegram.allowed_chat_ids)
-        # One bot can target several repos (see Config.repos); commands act on the
-        # active one, /repo switches. Each repo gets its own lazily-built Workflow.
-        self.repos = dict(config.repos) or {"main": config.repo}
+        # Targets a command acts on. In group mode the members are worked together
+        # as one target (the workspace); otherwise each repo is its own target,
+        # switchable with /repo. Each target gets its own lazily-built Workflow.
+        if config.workspace is not None:
+            self.repos = {config.workspace.name or "group": config.workspace}
+        else:
+            self.repos = dict(config.repos) or {"main": config.repo}
         self.active = next(iter(self.repos))
         self.workflow_factory = workflow_factory or (
             lambda repo_path: Workflow(replace(config, repo=repo_path))
