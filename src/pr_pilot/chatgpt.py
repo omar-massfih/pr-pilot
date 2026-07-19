@@ -381,10 +381,19 @@ _MAX_ROUNDS = 40
 _MAX_AGENT_SECONDS = 7200.0
 # How many times to push an implementer that "finished" without editing files.
 _MAX_WRITE_NUDGES = 2
+# A writing role still only reading by this round is exploring without end; from
+# here on each round tells it to commit to edits. Well below _MAX_ROUNDS so the
+# push has many rounds to take effect.
+_WRITE_BY_ROUND = 12
 _MAX_READ_BYTES = 12_000
 _MAX_OP_OUTPUT = 8_000
 _MAX_LIST_ENTRIES = 200
-_MAX_TRANSCRIPT_CHARS = 120_000
+# Transcript budget for the resent conversation. Must comfortably exceed a single
+# round of reads (~9 files x _MAX_READ_BYTES) plus the prefix, or one big-read
+# round fills the whole window and every earlier observation is evicted — the
+# model then re-reads the same files forever and never accumulates enough to
+# write. codex/gpt-5.5 context is far larger than this, so keep it generous.
+_MAX_TRANSCRIPT_CHARS = 500_000
 # Tracked files shown to the model up front so it can target files directly
 # instead of spending rounds discovering the repo layout.
 _MAX_TREE_FILES = 400
@@ -676,10 +685,22 @@ def run_chatgpt_agent(
                 wrote = True
             label = action.get("path") or action.get("op")
             observations.append(f"[{action.get('op')} {label}]\n{result}")
+        observation = "\n\n".join(observations)
+        # A writing role that is still only reading deep into the loop is stuck
+        # inspecting (a large repo can evict earlier reads from the transcript
+        # window, so it keeps re-reading). From _WRITE_BY_ROUND on, push it to
+        # commit to edits before it burns the whole round budget on inspection.
+        if allow_writes and not wrote and round_num >= _WRITE_BY_ROUND:
+            observation += (
+                f"\n\nYou are {round_num} rounds in and have not written anything "
+                "yet. Stop inspecting and emit your write actions now — you have "
+                "read enough. Only if a code change is genuinely not required, "
+                "reply with exactly NO_CHANGE."
+            )
         rounds.append(
             f"\n\n--- ASSISTANT ---\n{reply}"
             + "\n\n--- OBSERVATION ---\n"
-            + "\n\n".join(observations)
+            + observation
         )
     logger.info("agent loop hit max_rounds=%d (role=%s)", max_rounds, role)
     return last_prose or "Reached the maximum number of agent rounds."

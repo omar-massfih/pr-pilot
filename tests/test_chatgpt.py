@@ -411,6 +411,83 @@ class AgentLoopTests(unittest.TestCase):
                 result = chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
             self.assertEqual(result, "NO_CHANGE")
 
+    def test_writing_role_is_pushed_to_write_after_enough_reading(self):
+        # Regression: an implementer that keeps only reading used to burn every
+        # round without writing. Past _WRITE_BY_ROUND the observation must push
+        # it to commit, and it should then write and finish.
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "foo.py").write_text("print('hi')\n")
+            seen: list[str] = []
+            keep_reading = "inspecting\n" + _actions_block([{"op": "read", "path": "foo.py"}])
+            wrote_reply = "now writing\n" + _actions_block(
+                [{"op": "write", "path": "f.py", "content": "x = 1\n"}]
+            )
+            state = {"wrote": False}
+
+            def fake(prompt, model=None, **_kw):
+                seen.append(prompt)
+                if state["wrote"]:
+                    return "All done."  # no block -> finishes cleanly
+                if "Stop inspecting" in prompt:
+                    state["wrote"] = True
+                    return wrote_reply
+                return keep_reading
+
+            with patch("pr_pilot.chatgpt.run_chatgpt", fake):
+                chatgpt.run_chatgpt_agent("implement", repo, allow_writes=True)
+            # The push only appears for a writing role that hasn't written yet...
+            self.assertTrue(any("Stop inspecting" in prompt for prompt in seen))
+            # ...and it did not fire before the threshold round.
+            self.assertLessEqual(chatgpt._WRITE_BY_ROUND, len(seen))
+            self.assertFalse(any("Stop inspecting" in prompt for prompt in seen[:chatgpt._WRITE_BY_ROUND - 1]))
+            # ...and the model then wrote the file.
+            self.assertEqual((repo / "f.py").read_text(), "x = 1\n")
+
+    def test_read_only_role_is_never_pushed_to_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "foo.py").write_text("print('hi')\n")
+            seen: list[str] = []
+            keep_reading = "inspecting\n" + _actions_block([{"op": "read", "path": "foo.py"}])
+
+            def fake(prompt, model=None, **_kw):
+                seen.append(prompt)
+                return keep_reading
+
+            with patch("pr_pilot.chatgpt.run_chatgpt", fake):
+                chatgpt.run_chatgpt_agent(
+                    "review", repo, allow_writes=False, max_rounds=chatgpt._WRITE_BY_ROUND + 3
+                )
+            self.assertFalse(any("Stop inspecting" in prompt for prompt in seen))
+
+
+class TranscriptWindowTests(unittest.TestCase):
+    def test_keeps_all_rounds_that_fit(self):
+        rounds = [f"round-{i}" for i in range(5)]
+        out = chatgpt._compose_transcript("PREFIX", rounds, limit=10_000)
+        for rnd in rounds:
+            self.assertIn(rnd, out)
+        self.assertNotIn("older observations dropped", out)
+
+    def test_drops_only_the_oldest_when_over_budget(self):
+        rounds = ["A" * 100, "B" * 100, "C" * 100]
+        # Budget for 2 of the 3 rounds; the oldest (A) is evicted.
+        out = chatgpt._compose_transcript("P", rounds, limit=len("P") + 250)
+        self.assertIn("C" * 100, out)
+        self.assertIn("B" * 100, out)
+        self.assertNotIn("A" * 100, out)
+        self.assertIn("older observations dropped", out)
+
+    def test_default_budget_holds_several_big_read_rounds(self):
+        # The regression: one round of ~9 max-size reads filled the old 120K
+        # window, evicting every prior observation so the model re-read forever.
+        # The default budget must now hold several such rounds side by side.
+        big_round = "x" * (9 * chatgpt._MAX_READ_BYTES)  # ~108K, one read-heavy round
+        out = chatgpt._compose_transcript("prefix", [big_round, big_round, big_round])
+        self.assertEqual(out.count(big_round), 3)
+        self.assertNotIn("older observations dropped", out)
+
     def test_read_role_is_not_nudged_to_write(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
