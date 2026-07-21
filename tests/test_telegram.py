@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pr_pilot.config import Config, TelegramConfig
+from pr_pilot.config import Config, TelegramConfig, WorkflowConfig
 from pr_pilot.telegram import TelegramBot
 
 CHAT = 123
@@ -46,6 +47,24 @@ class FakeWorkflow:
     def reset_worktree(self):
         self.resets += 1
         self.dirty = False
+
+
+class PlanningFakeWorkflow(FakeWorkflow):
+    """A fake that supports the plan-approval gate (preview_plan + run(plan=))."""
+
+    def __init__(self, suggestions, plan="A PLAN"):
+        super().__init__(suggestions)
+        self.plan_text = plan
+        self.previewed = []
+        self.run_plans = []
+
+    def preview_plan(self, feature):
+        self.previewed.append(feature)
+        return self.plan_text
+
+    def run(self, feature, *, watch=None, plan=None):
+        self.run_plans.append(plan)
+        return super().run(feature, watch=watch)
 
 
 def _msg(text, chat_id=CHAT):
@@ -247,6 +266,78 @@ class TelegramLoopTests(unittest.TestCase):
         bot._handle(_msg("/auto"))
         self.assertIsNone(bot.pending)
         self.assertTrue(any("Could not suggest" in text for text in self.sent))
+
+
+class WorkerAndGateTests(unittest.TestCase):
+    def _bot(self, workflow, *, plan_approval=False):
+        config = Config(
+            repo=Path("/tmp"),
+            workflow=WorkflowConfig(plan_approval=plan_approval),
+            telegram=TelegramConfig(allowed_chat_ids=(CHAT,)),
+        )
+        self.sent: list[str] = []
+
+        def transport(method, values):
+            if method == "sendMessage":
+                self.sent.append(values["text"])
+            return {"ok": True, "result": {}}
+
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "tok"}):
+            bot = TelegramBot(config, lambda _path: workflow, transport=transport)
+        return bot
+
+    def test_worker_runs_jobs_off_thread_and_cancel_signals_while_busy(self):
+        bot = self._bot(FakeWorkflow([]))
+        started, release = threading.Event(), threading.Event()
+
+        def job():
+            started.set()
+            release.wait(2)
+
+        bot._start_worker()
+        bot._dispatch(job)
+        self.assertTrue(started.wait(2))
+        # The worker is busy, yet the poll thread still handles /cancel.
+        self.assertTrue(bot._busy)
+        bot._handle(_msg("/cancel"))
+        self.assertTrue(bot._cancel.is_set())
+        self.assertTrue(any("Cancelling" in text for text in self.sent))
+        release.set()
+        bot._jobs.join()
+        self.assertFalse(bot._busy)
+
+    def test_cancel_with_nothing_running_reports_idle(self):
+        bot = self._bot(FakeWorkflow([]))
+        bot._handle(_msg("/cancel"))
+        self.assertTrue(any("Nothing is running" in text for text in self.sent))
+
+    def test_feature_plan_approval_gates_the_build_behind_yes(self):
+        workflow = PlanningFakeWorkflow([], plan="Step 1. Step 2.")
+        bot = self._bot(workflow, plan_approval=True)
+
+        bot._handle(_msg("/feature Add CSV export"))
+        # Planned and awaiting approval — nothing built yet.
+        self.assertEqual(workflow.previewed, ["Add CSV export"])
+        self.assertEqual(bot.pending, "Add CSV export")
+        self.assertEqual(workflow.runs, [])
+        self.assertTrue(any("Plan for" in text for text in self.sent))
+
+        bot._handle(_msg("/yes"))
+        # Built from the pre-approved plan; a gated /feature does not auto-loop.
+        self.assertEqual(workflow.runs, [("Add CSV export", True)])
+        self.assertEqual(workflow.run_plans, ["Step 1. Step 2."])
+        self.assertIsNone(bot.pending)
+
+    def test_editing_a_gated_plan_forces_a_replan_on_build(self):
+        workflow = PlanningFakeWorkflow([])
+        bot = self._bot(workflow, plan_approval=True)
+        bot._handle(_msg("/feature Add CSV export"))
+        bot._handle(_msg("/edit Add CSV export with a header row"))
+        self.assertEqual(bot.pending, "Add CSV export with a header row")
+        bot._handle(_msg("/yes"))
+        # The revised feature dropped the preview, so it builds with no plan.
+        self.assertEqual(workflow.run_plans, [None])
+        self.assertEqual(workflow.runs, [("Add CSV export with a header row", True)])
 
 
 class OffsetPersistenceTests(unittest.TestCase):

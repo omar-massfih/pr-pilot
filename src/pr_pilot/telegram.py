@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import threading
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -23,6 +25,7 @@ HELP = (
     "(or just send the revised text)\n"
     "/repo [name] — list repos, or switch which one you're targeting\n"
     "/stop — end the auto loop\n"
+    "/cancel — stop the run currently in progress\n"
     "/feature <description> — build a specific feature now"
 )
 
@@ -66,6 +69,21 @@ class TelegramBot:
         self._transport = transport
         self._workflows: dict[str, Workflow] = {}
         self.pending: str | None = None
+        # A plan awaiting /yes, kept alongside self.pending when plan_approval is
+        # on, so an approved feature is built from the plan already shown (and not
+        # planned a second time).
+        self._pending_plan: str | None = None
+        # Long builds run on one background worker so the poll loop keeps handling
+        # /stop, /cancel, and status while a run is in flight. Tests that call
+        # _handle directly never start the worker, so work runs inline for them.
+        self._jobs: queue.Queue = queue.Queue()
+        self._worker: threading.Thread | None = None
+        self._cancel = threading.Event()
+        self._busy = False
+        self._progress_chat: int | None = None
+        # True while an /auto suggestion loop is active, so /yes and /no continue
+        # proposing; a gated /feature sets it False so approval builds just that.
+        self._auto_loop = False
         # Resume from the last confirmed update so a restart neither reprocesses
         # old commands (a re-run /feature could rebuild) nor drops new ones.
         self.offset = self._load_offset()
@@ -92,6 +110,7 @@ class TelegramBot:
             "telegram bot polling; repo=%s allowed_chats=%d offset=%d",
             self.config.repo, len(self.allowed), self.offset,
         )
+        self._start_worker()
         while True:
             updates = self._call("getUpdates", {"timeout": 30, "offset": self.offset})["result"]
             for update in updates:
@@ -101,12 +120,66 @@ class TelegramBot:
                 self._save_offset()
                 self._handle(update)
 
+    def _start_worker(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            fn, args = self._jobs.get()
+            self._cancel.clear()
+            self._busy = True
+            try:
+                fn(*args)
+            except Exception:
+                logger.exception("background job failed")
+            finally:
+                self._busy = False
+                self._jobs.task_done()
+
+    def _dispatch(self, fn: Callable, *args) -> None:
+        """Run heavy (workflow-invoking) work on the worker when it's running so
+        polling stays responsive; otherwise inline — the path tests take when they
+        call _handle directly without serve_forever."""
+        if self._worker and self._worker.is_alive():
+            self._jobs.put((fn, args))
+        else:
+            fn(*args)
+
+    def _on_phase(self, phase: str, state) -> None:
+        """Progress hook the workflow fires at each phase boundary. pr_open and
+        complete are already announced by _build/babysit, so they're skipped."""
+        chat = self._progress_chat
+        if chat is None:
+            return
+        messages = {
+            "planning": "📋 Planning…",
+            "implementing": "🔧 Implementing…",
+            "verifying": "✅ Running tests/lint/build…",
+            "reviewing": f"🔍 Reviewing (attempt {state.review_attempts + 1})…",
+            "repairing": "🛠 Addressing findings…",
+            "publishing": "📤 Opening the pull request…",
+            "babysitting": "👀 Watching CI…",
+        }
+        text = messages.get(phase)
+        if text:
+            self.send(chat, f"[{self.active}] {text}")
+
     def _workflow_instance(self) -> Workflow:
         # One workflow per repo, shared across that repo's recommend/run so they
         # use the same providers and memory; built lazily so construction errors
         # surface on use.
         if self.active not in self._workflows:
-            self._workflows[self.active] = self.workflow_factory(self.repos[self.active])
+            wf = self.workflow_factory(self.repos[self.active])
+            # The real Workflow exposes a progress hook and a cooperative cancel
+            # probe; injected fakes may not, so wire them only when present.
+            if hasattr(wf, "on_phase"):
+                wf.on_phase = self._on_phase
+            if hasattr(wf, "cancel_check"):
+                wf.cancel_check = self._cancel.is_set
+            self._workflows[self.active] = wf
         return self._workflows[self.active]
 
     def _handle(self, update: dict) -> None:
@@ -122,23 +195,32 @@ class TelegramBot:
         if command in ("/start", "/help", ""):
             self.send(chat_id, HELP)
         elif command == "/auto":
-            self._suggest(chat_id)
+            self._dispatch(self._suggest, chat_id)
         elif command in ("/yes", "/y", "/approve"):
-            self._approve(chat_id)
+            self._dispatch(self._approve, chat_id)
         elif command in ("/no", "/n", "/skip"):
-            self._skip(chat_id)
+            self._dispatch(self._skip, chat_id)
         elif command == "/repo":
             self._switch_repo(chat_id, text.removeprefix("/repo").strip())
         elif command == "/stop":
             self.pending = None
+            self._pending_plan = None
             self.send(chat_id, "Auto loop stopped. Send /auto to start again.")
+        elif command == "/cancel":
+            self._cancel_run(chat_id)
         elif command == "/feature":
             feature = text.removeprefix("/feature").strip()
             if not feature:
                 self.send(chat_id, "Expected: /feature <description>")
+            elif self.config.workflow.plan_approval:
+                # Gate: plan first and wait for /yes instead of building now.
+                self.pending = None
+                self._pending_plan = None
+                self._dispatch(self._plan_for_approval, chat_id, feature)
             else:
                 self.pending = None
-                self._build(chat_id, feature)
+                self._pending_plan = None
+                self._dispatch(self._build, chat_id, feature)
         elif command == "/edit":
             self._edit(chat_id, text.removeprefix("/edit").strip())
         elif self.pending and text and not text.startswith("/"):
@@ -176,9 +258,38 @@ class TelegramBot:
             return
         self.active = match
         self.pending = None
+        self._pending_plan = None
         self.send(chat_id, f"Now targeting '{match}'. Send /auto for a suggestion.")
 
+    def _cancel_run(self, chat_id: int) -> None:
+        if self._busy:
+            self._cancel.set()
+            self.send(chat_id, "Cancelling the current run at the next step…")
+        else:
+            self.send(chat_id, "Nothing is running right now.")
+
+    def _plan_for_approval(self, chat_id: int, feature: str) -> None:
+        """Plan a /feature request and wait for /yes, when plan_approval is on."""
+        self._auto_loop = False
+        self.send(chat_id, f"[{self.active}] Planning '{feature[:60]}'…")
+        try:
+            plan = self._workflow_instance().preview_plan(feature)
+        except Exception as exc:
+            logger.warning("preview_plan failed: %s", exc)
+            self._recover()
+            self.send(chat_id, f"Could not plan that feature: {exc}")
+            return
+        self.pending = feature
+        self._pending_plan = plan
+        self.send(
+            chat_id,
+            f"📋 [{self.active}] Plan for:\n\n{feature}\n\n{plan}\n\n"
+            "/yes to build it · /edit to revise · /no to discard.",
+        )
+
     def _suggest(self, chat_id: int) -> None:
+        self._auto_loop = True
+        self._pending_plan = None
         self.send(chat_id, f"[{self.active}] Looking for the next feature to suggest…")
         wf = self._workflow_instance()
         feature = None
@@ -219,17 +330,26 @@ class TelegramBot:
             self.send(chat_id, "Nothing to confirm. Send /auto to get a suggestion.")
             return
         feature = self.pending
+        plan = self._pending_plan
+        auto = self._auto_loop
         self.pending = None
-        self._build(chat_id, feature)
-        # Continue the loop: propose the next feature for confirmation.
-        self._suggest(chat_id)
+        self._pending_plan = None
+        self._build(chat_id, feature, plan=plan)
+        # In the /auto loop, continue by proposing the next feature; a gated
+        # /feature approval builds just the one and stops.
+        if auto:
+            self._suggest(chat_id)
 
     def _skip(self, chat_id: int) -> None:
         if not self.pending:
             self.send(chat_id, "Nothing to skip. Send /auto to get a suggestion.")
             return
         self.pending = None
-        self._suggest(chat_id)
+        self._pending_plan = None
+        if self._auto_loop:
+            self._suggest(chat_id)
+        else:
+            self.send(chat_id, "Discarded. Send /feature <description> or /auto.")
 
     def _edit(self, chat_id: int, feature: str) -> None:
         """Replace the pending suggestion with the user's revision.
@@ -249,6 +369,7 @@ class TelegramBot:
             self.send(chat_id, "Expected: /edit <revised feature>")
             return
         self.pending = feature
+        self._pending_plan = None  # the revised text invalidates any planned preview
         logger.info("edited suggested feature: %s", feature)
         self.send(
             chat_id,
@@ -256,13 +377,18 @@ class TelegramBot:
             "/yes to build it · /no for a different one · /stop to end.",
         )
 
-    def _build(self, chat_id: int, feature: str) -> None:
-        self.send(chat_id, f"Accepted [{self.active}]. Planning, implementation, and CI babysitting have started — this can take a while.")
+    def _build(self, chat_id: int, feature: str, plan: str | None = None) -> None:
+        self._progress_chat = chat_id
+        self.send(chat_id, f"Accepted [{self.active}]. Planning, implementation, verification, and CI babysitting have started — this can take a while. Send /cancel to stop.")
         logger.info("building feature on %s: %s", self.active, feature)
         try:
             # watch=True: after opening the PR, babysit CI and address failures
-            # before the loop moves on to the next suggestion.
-            state = self._workflow_instance().run(feature, watch=True)
+            # before the loop moves on to the next suggestion. A pre-approved plan
+            # (from the /feature gate) is reused so it isn't planned twice.
+            kwargs: dict = {"watch": True}
+            if plan is not None:
+                kwargs["plan"] = plan
+            state = self._workflow_instance().run(feature, **kwargs)
             logger.info("build finished: phase=%s pr=%s", state.phase, state.pr_url)
             self.send(chat_id, f"✅ Finished: {state.pr_url}\nState: {state.phase}")
         except Exception as exc:
@@ -270,6 +396,8 @@ class TelegramBot:
             # Clear the failed run's partial edits so the loop can continue.
             self._recover()
             self.send(chat_id, f"Run stopped: {exc}")
+        finally:
+            self._progress_chat = None
 
     def send(self, chat_id: int, text: str) -> None:
         self._call("sendMessage", {"chat_id": chat_id, "text": text[:4096]})

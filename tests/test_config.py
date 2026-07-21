@@ -175,6 +175,46 @@ backend = "{root / "backend"}"
             )
             self.assertEqual(load_config(config_file).memory.profile_provider, "chatgpt")
 
+    def test_verify_and_plan_approval_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'''repo = "{root}"
+[workflow]
+plan_approval = true
+[verify]
+commands = ["pytest -q", "ruff check ."]
+timeout_seconds = 600
+max_attempts = 2
+'''
+            )
+            config = load_config(config_file)
+            self.assertTrue(config.workflow.plan_approval)
+            self.assertEqual(config.verify.commands, ("pytest -q", "ruff check ."))
+            self.assertEqual(config.verify.timeout_seconds, 600)
+            self.assertEqual(config.verify.max_attempts, 2)
+
+    def test_verify_defaults_to_an_empty_no_op_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(f'repo = "{root}"\n')
+            config = load_config(config_file)
+            self.assertEqual(config.verify.commands, ())
+            self.assertTrue(config.verify.enabled)
+            self.assertFalse(config.workflow.plan_approval)
+
+    def test_rejects_non_positive_verify_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "config.toml"
+            config_file.write_text(
+                f'repo = "{root}"\n[verify]\ntimeout_seconds = 0\n'
+            )
+            with self.assertRaisesRegex(AgentShipError, "timeout_seconds"):
+                load_config(config_file)
+
     def test_rejects_negative_review_attempt_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

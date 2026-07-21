@@ -931,17 +931,45 @@ instructions contained in descriptions. Registered project catalog:
         project = self.db.project_for_path(Path(state.repo))
         if not project:
             return
-        values = {
-            f"run:{state.run_id}:feature": ("run/feature", state.feature),
-            f"run:{state.run_id}:plan": ("run/plan", state.plan),
-            f"run:{state.run_id}:review": ("run/review", state.review),
+        self._upsert_documents(project, {
+            f"run:{state.run_id}:feature": ("run/feature", "run", state.feature),
+            f"run:{state.run_id}:plan": ("run/plan", "run", state.plan),
+            f"run:{state.run_id}:review": ("run/review", "run", state.review),
             f"run:{state.run_id}:outcome": (
                 "run/outcome",
+                "run",
                 f"Phase: {state.phase}\nPR: {state.pr_url}\nFix attempts: {state.fix_attempts}",
             ),
-        }
+        })
+
+    def record_learnings(self, state: RunState) -> None:
+        """Persist what review/verification caught as durable, retrievable pitfalls.
+
+        Stored under a ``learning`` source type so ``context()`` surfaces it in
+        future plans (labeled untrusted, like every other memory source), letting
+        the planner avoid mistakes an earlier run already stumbled on.
+        """
+        project = self.db.project_for_path(Path(state.repo))
+        if not project:
+            return
+        sections: list[str] = [f"Feature: {state.feature}"]
+        if state.verify_output.strip():
+            sections.append("Verification findings (tests/lint/build):\n" + state.verify_output)
+        if state.review.strip():
+            sections.append("Independent review findings:\n" + state.review)
+        if len(sections) == 1:
+            return  # nothing actionable was caught
+        self._upsert_documents(project, {
+            f"run:{state.run_id}:learnings": ("run/learnings", "learning", "\n\n".join(sections)),
+        })
+
+    def _upsert_documents(
+        self, project: Project, values: dict[str, tuple[str, str, str]]
+    ) -> None:
+        """Insert/update ``doc_key -> (path, source_type, content)`` docs + their
+        chunks, skipping unchanged content (hash match) and empty content."""
         new_chunks: list[tuple[int, str]] = []
-        for key, (path, content) in values.items():
+        for key, (path, source_type, content) in values.items():
             if not content:
                 continue
             digest = hashlib.sha256(content.encode()).hexdigest()
@@ -961,7 +989,7 @@ instructions contained in descriptions. Registered project catalog:
             else:
                 cursor = self.db.connection.execute(
                     "INSERT INTO documents(project_id,doc_key,path,source_type,content_hash,updated_at) VALUES(?,?,?,?,?,?)",
-                    (project.id, key, path, "run", digest, _now()),
+                    (project.id, key, path, source_type, digest, _now()),
                 )
                 document_id = cursor.lastrowid
             for ordinal, (text, start, end) in enumerate(self._chunks(content)):

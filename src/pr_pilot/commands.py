@@ -21,6 +21,7 @@ def run(
     cwd: Path,
     env: Mapping[str, str] | None = None,
     check: bool = True,
+    timeout: float | None = None,
 ) -> Result:
     try:
         completed = subprocess.run(
@@ -30,9 +31,17 @@ def run(
             text=True,
             capture_output=True,
             check=False,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise AgentShipError(f"Required command not found: {command[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        detail = f"Command timed out after {timeout}s: {command[0]}"
+        if check:
+            raise AgentShipError(detail) from exc
+        # A verification gate (check=False) treats a timeout as a failing run,
+        # keeping any partial output the command produced before it was killed.
+        return Result(exc.stdout or "", (exc.stderr or "") + "\n" + detail, 124)
     result = Result(completed.stdout, completed.stderr, completed.returncode)
     if check and completed.returncode:
         detail = (completed.stderr or completed.stdout).strip()

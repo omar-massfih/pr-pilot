@@ -15,6 +15,8 @@ class RunState:
     plan: str = ""
     review: str = ""
     review_attempts: int = 0
+    verify_attempts: int = 0
+    verify_output: str = ""
     pr_url: str = ""
     handled_feedback: list[str] = field(default_factory=list)
     fix_attempts: int = 0
