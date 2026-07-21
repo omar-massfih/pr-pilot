@@ -149,6 +149,39 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(profiler.calls, 1)
             self.assertTrue(any(hit.source_type == "run" for hit in hits))
 
+    def test_record_learnings_stores_retrievable_pitfalls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root, "payments")
+            service = self.service(root, repo)
+            project = service.add_project(repo)
+            service.index_project(project.id)
+            state = RunState(
+                "run-2", "Add refunds", str(repo),
+                review="Finding: the refund path skips billing validation.",
+                verify_output="$ pytest  →  FAILED\nAssertionError in test_billing",
+            )
+
+            service.record_learnings(state)
+            hits = service.search("billing validation", project_ref=project.id)
+
+            self.assertTrue(any(hit.source_type == "learning" for hit in hits))
+
+    def test_record_learnings_is_a_no_op_without_findings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root, "payments")
+            service = self.service(root, repo)
+            project = service.add_project(repo)
+            service.index_project(project.id)
+
+            service.record_learnings(RunState("run-3", "Add refunds", str(repo)))
+
+            learnings = service.db.connection.execute(
+                "SELECT count(*) AS n FROM documents WHERE source_type='learning'"
+            ).fetchone()["n"]
+            self.assertEqual(learnings, 0)
+
     def test_generated_relationship_and_manual_block(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

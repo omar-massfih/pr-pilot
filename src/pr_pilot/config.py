@@ -31,6 +31,26 @@ class GitHubConfig:
 @dataclass(frozen=True)
 class WorkflowConfig:
     max_review_attempts: int = 3
+    # When true, /feature (like /auto) sends the plan for approval before it
+    # implements, so a human can steer before any code is written. Off by
+    # default, so existing intake behavior is unchanged.
+    plan_approval: bool = False
+
+
+@dataclass(frozen=True)
+class VerifyConfig:
+    """Deterministic build/test/lint gate between implement and PR.
+
+    ``commands`` are shell strings (``shlex``-split) run in the workspace; a
+    non-zero exit from any is a failure whose output is fed back to the repair
+    agent. Empty ``commands`` makes verification a no-op, so a repo without a
+    configured gate keeps the original workflow.
+    """
+
+    enabled: bool = True
+    commands: tuple[str, ...] = ()
+    timeout_seconds: int = 1_200
+    max_attempts: int = 4
 
 
 @dataclass(frozen=True)
@@ -75,6 +95,7 @@ class Config:
     designer: ProviderConfig = field(default_factory=ProviderConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    verify: VerifyConfig = field(default_factory=VerifyConfig)
     babysit: BabysitConfig = field(default_factory=BabysitConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -133,6 +154,7 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
     configured_repo = primary
     gh = data.get("github", {})
     workflow = data.get("workflow", {})
+    verify = data.get("verify", {})
     baby = data.get("babysit", {})
     telegram = data.get("telegram", {})
     memory = data.get("memory", {})
@@ -148,6 +170,13 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
         ),
         workflow=WorkflowConfig(
             max_review_attempts=int(workflow.get("max_review_attempts", 3)),
+            plan_approval=bool(workflow.get("plan_approval", False)),
+        ),
+        verify=VerifyConfig(
+            enabled=bool(verify.get("enabled", True)),
+            commands=tuple(str(cmd) for cmd in verify.get("commands", [])),
+            timeout_seconds=int(verify.get("timeout_seconds", 1_200)),
+            max_attempts=int(verify.get("max_attempts", 4)),
         ),
         babysit=BabysitConfig(
             enabled=bool(baby.get("enabled", True)),
@@ -189,6 +218,10 @@ def load_config(path: Path | None = None, repo: Path | None = None) -> Config:
             )
     if config.workflow.max_review_attempts < 0:
         raise AgentShipError("workflow.max_review_attempts cannot be negative")
+    if config.verify.max_attempts < 0:
+        raise AgentShipError("verify.max_attempts cannot be negative")
+    if config.verify.timeout_seconds <= 0:
+        raise AgentShipError("verify.timeout_seconds must be positive")
     for provider in (config.implementer, config.reviewer, config.designer):
         if provider.limit_poll_seconds <= 0 or provider.limit_max_wait_seconds < 0:
             raise AgentShipError(
